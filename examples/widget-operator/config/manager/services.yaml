@@ -1,0 +1,25 @@
+# Per-track metrics frontends: stable DNS names for Prometheus
+# static scraping (no discovery RBAC needed). The controller name
+# inside is per-track (<track>-widget), so canary errors stay
+# separable from stable's.
+apiVersion: v1
+kind: Service
+metadata:
+  name: widget-stable-metrics
+  namespace: widget-system
+  labels: {track: stable}
+spec:
+  selector: {app: widget-operator, track: stable}
+  ports:
+  - {name: metrics, port: 8080, targetPort: 8080, protocol: TCP}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: widget-canary-metrics
+  namespace: widget-system
+  labels: {track: canary}
+spec:
+  selector: {app: widget-operator, track: canary}
+  ports:
+  - {name: metrics, port: 8080, targetPort: 8080, protocol: TCP}

@@ -1,0 +1,55 @@
+# ShardPlan RBAC for the Argo Rollouts controller ServiceAccount.
+# The plugin inherits this identity and lists/writes ShardPlans in
+# the Rollout's namespace (widget-system for the M2 demo; repeat
+# per namespace for other rollouts).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argo-rollouts-shardplans
+  namespace: widget-system
+rules:
+# Spec only: the plugin never writes status (observers own that).
+- apiGroups: ["shardkit.dev"]
+  resources: ["shardplans"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argo-rollouts-shardplans
+  namespace: widget-system
+subjects:
+- kind: ServiceAccount
+  name: argo-rollouts
+  namespace: argo-rollouts
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argo-rollouts-shardplans
+---
+# Cluster reachability probe: InitPlugin lists ShardPlans with no
+# namespace (Limit 1) to fail closed with a named fix when the API
+# or RBAC is missing. That probe is cluster-scoped by construction,
+# so it needs a cluster grant; read-only and shardplans-only keeps
+# the blast radius at the probe. All writes stay namespaced above.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: argo-rollouts-shardplans-read
+rules:
+- apiGroups: ["shardkit.dev"]
+  resources: ["shardplans"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: argo-rollouts-shardplans-read
+subjects:
+- kind: ServiceAccount
+  name: argo-rollouts
+  namespace: argo-rollouts
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: argo-rollouts-shardplans-read

@@ -1,0 +1,59 @@
+# M4 admission example: webhook server + API server wiring.
+# Namespace widget-system must exist (bring-up.sh creates it).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shardkit-admission
+  namespace: widget-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: shardkit-admission}
+  template:
+    metadata:
+      labels: {app: shardkit-admission}
+    spec:
+      containers:
+      - name: admission
+        # Build locally: go build ./examples/admission.
+        image: shardkit-admission:dev
+        imagePullPolicy: IfNotPresent
+        args: ["--webhook-cert-dir", "/certs"]
+        ports: [{containerPort: 9443, name: webhook}]
+        volumeMounts: [{name: certs, mountPath: /certs, readOnly: true}]
+      volumes:
+      - name: certs
+        secret: {secretName: shardkit-admission-certs}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shardkit-admission
+  namespace: widget-system
+spec:
+  selector: {app: shardkit-admission}
+  ports: [{port: 443, targetPort: webhook}]
+---
+# failurePolicy Fail is deliberate (fail closed, like the gate):
+# a webhook outage blocks ShardPlan writes instead of passing
+# malformed specs. See examples/admission/README.md for recovery.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: shardkit-plan-validation
+webhooks:
+- name: validate.shardplan.shardkit.dev
+  failurePolicy: Fail
+  sideEffects: None
+  admissionReviewVersions: ["v1"]
+  clientConfig:
+    service:
+      namespace: widget-system
+      name: shardkit-admission
+      path: /validate-shardkit-dev-v1alpha1-shardplan
+    caBundle: PLACEHOLDER_SEE_README
+  rules:
+  - apiGroups: ["shardkit.dev"]
+    apiVersions: ["v1alpha1"]
+    operations: ["CREATE", "UPDATE"]
+    resources: ["shardplans"]

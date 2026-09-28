@@ -1,0 +1,30 @@
+# Example Prometheus AnalysisTemplate: shardkit handshake degraded.
+#
+# Fails the analysis when the canary observer reports a degraded
+# handshake (e.g. AcquireWaiting past its deadline: the winner is
+# fenced behind a loser's ack that never lands). This is the
+# shardkit-native budget trip from docs/safety-model.md: in a
+# healthy rollout the counter stays flat at zero, so any increase
+# over the window fails. Labels follow pkg/shardkit/metrics.go
+# (track, revision, event are bounded enums).
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: widget-handshake-degraded
+spec:
+  metrics:
+    - name: canary-degraded
+      interval: 30s
+      # count: see error-rate.yaml — inline step analyses must
+      # terminate, or the Rollout is InvalidSpec.
+      count: 2
+      failureLimit: 1
+      successCondition: result[0] == 0
+      provider:
+        prometheus:
+          address: http://prometheus-server.monitoring:80
+          # `or vector(0)`: see error-rate.yaml — a healthy rollout
+          # never fires degraded, so the series is absent until the
+          # first stuck handshake.
+          query: |
+            sum(increase(shardkit_observer_transitions_total{track="canary",event="degraded"}[5m])) or vector(0)

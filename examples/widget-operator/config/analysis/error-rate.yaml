@@ -1,0 +1,39 @@
+# Example Prometheus AnalysisTemplate: canary reconcile error rate.
+#
+# Fails the analysis (and aborts the Argo update) when the canary
+# operator's reconcile errors spike: the M2 demo's injected bug
+# (a canary image that errors on every widget) trips this in one
+# interval. Built on controller-runtime metrics; the controller
+# name is per-track (`<track>-widget`, see main.go), so the canary
+# default selects only canary errors. Provider `prometheus` must exist in the Argo
+# Rollouts installation (address below targets the in-kind demo
+# Prometheus Service; adjust for other environments).
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: widget-canary-error-rate
+spec:
+  args:
+    - name: canary-controller
+      value: canary-widget
+  metrics:
+    - name: canary-error-rate
+      interval: 30s
+      # count: inline canary-step analyses must terminate (an
+      # interval-only metric "runs indefinitely" and the Rollout is
+      # rejected InvalidSpec). Two consecutive successes gate each
+      # step; a single failure fails the run (failureLimit 1).
+      count: 2
+      failureLimit: 1
+      successCondition: result[0] <= 0.01
+      provider:
+        prometheus:
+          address: http://prometheus-server.monitoring:80
+          # `or vector(0)`: a healthy canary emits no errors, so the
+          # series is absent until the first failure. Without the
+          # fallback an empty result never succeeds and the good
+          # path stalls. Residual risk (broken scraping also reads
+          # as success) belongs to infra up-target alerting, not
+          # this gate.
+          query: |
+            sum(rate(controller_runtime_reconcile_errors_total{controller="{{args.canary-controller}}"}[2m])) or vector(0)

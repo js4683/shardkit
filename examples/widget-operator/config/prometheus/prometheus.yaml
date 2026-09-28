@@ -1,0 +1,74 @@
+# Minimal Prometheus for the M2 kind demo (no helm): static
+# targets only, so no discovery RBAC is needed. Image pinned to
+# prom/prometheus:v3.15.0. Storage is an emptyDir: demo data is
+# ephemeral. The Service name/port match the AnalysisTemplate
+# provider address http://prometheus-server.monitoring:80.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+    scrape_configs:
+      - job_name: prometheus
+        static_configs:
+          - targets: ["localhost:9090"]
+      - job_name: widget-operator
+        static_configs:
+          - targets:
+              - widget-stable-metrics.widget-system:8080
+              - widget-canary-metrics.widget-system:8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-server
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: prometheus-server}
+  template:
+    metadata:
+      labels: {app: prometheus-server}
+    spec:
+      containers:
+      - name: prometheus
+        image: prom/prometheus:v3.15.0
+        imagePullPolicy: IfNotPresent
+        args:
+        - --config.file=/etc/prometheus/prometheus.yml
+        - --storage.tsdb.path=/prometheus
+        - --web.enable-lifecycle
+        ports:
+        - {containerPort: 9090, name: web, protocol: TCP}
+        volumeMounts:
+        - {name: config, mountPath: /etc/prometheus}
+        - {name: data, mountPath: /prometheus}
+        resources:
+          requests: {cpu: 100m, memory: 256Mi}
+          limits: {cpu: 1000m, memory: 1Gi}
+      volumes:
+      - name: config
+        configMap: {name: prometheus-config}
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-server
+  namespace: monitoring
+spec:
+  selector: {app: prometheus-server}
+  ports:
+  - {name: web, port: 80, targetPort: web, protocol: TCP}

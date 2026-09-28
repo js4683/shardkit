@@ -1,0 +1,106 @@
+# M2 Argo demo: one Rollout driving the widget-operator ShardPlan
+# (`widget-system/widget-operator`) through the js4683/shardkit
+# traffic-router plugin (see docs/argo-plugin.md).
+#
+# Workload honesty note: the Rollout's own pods are pause stubs.
+# They exist only as Argo's progression vehicle (step weights,
+# canary/stable ReplicaSets, hashes). The real canary membership
+# is the ShardPlan's namespace cohort, moved by the widget track
+# operators; the analysis gates read shardkit/controller-runtime
+# metrics from Prometheus. The trace (docs/traces/m2-argo-demo.md)
+# asserts on plan epochs, track acks, and metric values — not on
+# stub pods receiving traffic.
+#
+# Revision bridge (S7): Argo computes the canary hash from the
+# stub template, so after the first UpdateHash the plan's canary
+# revision is that hash. The demo binds the canary operator to it
+# (`kubectl set env deploy/widget-canary REVISION=<hash>`); until
+# then the canary is fenced and VerifyWeight stays NotVerified by
+# design. In production the canary operator ships with the canary
+# release (REVISION baked in) and the human/CI binds the spec to
+# match; UpdateHash then only confirms.
+apiVersion: v1
+kind: Service
+metadata:
+  name: widget-demo-stable
+  namespace: widget-system
+spec:
+  selector: {app: widget-demo}
+  ports: [{port: 80, targetPort: 8080}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: widget-demo-canary
+  namespace: widget-system
+spec:
+  selector: {app: widget-demo}
+  ports: [{port: 80, targetPort: 8080}]
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: widget-demo
+  namespace: widget-system
+  # Flip to "true" (and rotate stub-tag below) for the second,
+  # chaos-path generation: a template change mints a new canary
+  # hash, which exercises UpdateHash hash rotation.
+  annotations:
+    shardkit.dev/stub-tag: "gen1"
+spec:
+  replicas: 2
+  revisionHistoryLimit: 2
+  # Five plugin-verified weight steps plus two 30s analyses each
+  # need headroom: every step waits for a full plan handshake
+  # (epoch+1, both tracks ack) before VerifyWeight passes.
+  progressDeadlineSeconds: 1800
+  selector:
+    matchLabels: {app: widget-demo}
+  template:
+    metadata:
+      labels: {app: widget-demo}
+    spec:
+      containers:
+        - name: stub
+          image: registry.k8s.io/pause:3.9
+  strategy:
+    canary:
+      stableService: widget-demo-stable
+      canaryService: widget-demo-canary
+      trafficRouting:
+        plugins:
+          "js4683/shardkit": {}
+      steps:
+        - setWeight: 1
+        - analysis:
+            templates:
+              - templateName: widget-canary-error-rate
+              - templateName: widget-handshake-degraded
+            args:
+              - name: canary-controller
+                value: canary-widget
+        - setWeight: 5
+        - analysis:
+            templates:
+              - templateName: widget-canary-error-rate
+              - templateName: widget-handshake-degraded
+            args:
+              - name: canary-controller
+                value: canary-widget
+        - setWeight: 25
+        - analysis:
+            templates:
+              - templateName: widget-canary-error-rate
+              - templateName: widget-handshake-degraded
+            args:
+              - name: canary-controller
+                value: canary-widget
+        - setWeight: 50
+        - analysis:
+            templates:
+              - templateName: widget-canary-error-rate
+              - templateName: widget-handshake-degraded
+            args:
+              - name: canary-controller
+                value: canary-widget
+        - setWeight: 100

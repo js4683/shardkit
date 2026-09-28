@@ -1,0 +1,24 @@
+# Initial ShardPlan for the M0-06 experiment: explicit Off rest
+# state (B1), epoch 1, the brief's example seed. BOOTSTRAP ONLY: the
+# server rejects backward epochs, so never re-apply this over a live
+# plan; bring-up.sh resets existing plans forward instead. The trace
+# script drives Active transitions from here with kubectl patch.
+apiVersion: shardkit.dev/v1alpha1
+kind: ShardPlan
+metadata:
+  name: widget-operator
+  namespace: widget-system
+spec:
+  key: namespace
+  rollout: r-001
+  epoch: 1
+  seed: 9a1f2e
+  tracks:
+    stable: {revision: rev-a}
+    canary: {revision: rev-b}
+  canary:
+    mode: "Off" # quoted: unquoted Off parses as boolean false
+    weightPerMille: 0
+    include: {namespaces: []}
+    exclude: {}
+  singletonOwner: stable

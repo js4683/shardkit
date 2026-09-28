@@ -1,0 +1,373 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: shardplans.shardkit.dev
+spec:
+  group: shardkit.dev
+  names:
+    kind: ShardPlan
+    listKind: ShardPlanList
+    plural: shardplans
+    shortNames:
+    - sp
+    singular: shardplan
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: ShardPlan is the Schema for the shardplans API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ShardPlanSpec defines the desired rollout state. Writers own this;
+              the library only reads it. See docs/shardplan-spec.md sections 1-3.
+              CEL rules mirror library validation V1-V9 as defense in depth;
+              library validation stays authoritative for reads.
+            properties:
+              budget:
+                description: |-
+                  Budget caps destructive deletes per track per epoch (M3).
+                  Absent (nil) means unbounded; existing plans without budgets
+                  behave exactly as before.
+                properties:
+                  maxDeletionPercent:
+                    description: |-
+                      MaxDeletionPercent caps deletes per track per epoch as a
+                      percentage of the namespaces the track owns (0..100).
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  maxDeletions:
+                    description: MaxDeletions caps deletes per track per epoch.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                type: object
+              canary:
+                description: Canary carries mode, weight, and cohort rules.
+                properties:
+                  exclude:
+                    description: |-
+                      ExcludeSpec selects namespaces pinned to stable. M1 supports
+                      matchLabels only; matchExpressions is rejected until implemented.
+                    properties:
+                      selector:
+                        description: |-
+                          A label selector is a label query over a set of resources. The result of matchLabels and
+                          matchExpressions are ANDed. An empty label selector matches all objects. A null
+                          label selector matches no objects.
+                        properties:
+                          matchExpressions:
+                            description: matchExpressions is a list of label selector
+                              requirements. The requirements are ANDed.
+                            items:
+                              description: |-
+                                A label selector requirement is a selector that contains values, a key, and an operator that
+                                relates the key and values.
+                              properties:
+                                key:
+                                  description: key is the label key that the selector
+                                    applies to.
+                                  type: string
+                                operator:
+                                  description: |-
+                                    operator represents a key's relationship to a set of values.
+                                    Valid operators are In, NotIn, Exists and DoesNotExist.
+                                  type: string
+                                values:
+                                  description: |-
+                                    values is an array of string values. If the operator is In or NotIn,
+                                    the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                    the values array must be empty. This array is replaced during a strategic
+                                    merge patch.
+                                  items:
+                                    type: string
+                                  type: array
+                                  x-kubernetes-list-type: atomic
+                              required:
+                              - key
+                              - operator
+                              type: object
+                            type: array
+                            x-kubernetes-list-type: atomic
+                          matchLabels:
+                            additionalProperties:
+                              type: string
+                            description: |-
+                              matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                              map is equivalent to an element of matchExpressions, whose key field is "key", the
+                              operator is "In", and the values array contains only "value". The requirements are ANDed.
+                            type: object
+                        type: object
+                        x-kubernetes-map-type: atomic
+                    type: object
+                  include:
+                    description: IncludeSpec lists explicitly canaried namespaces.
+                    properties:
+                      namespaces:
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                  mode:
+                    description: Mode is Off, Shadow, or Active.
+                    enum:
+                    - "Off"
+                    - Shadow
+                    - Active
+                    type: string
+                  weightPerMille:
+                    description: WeightPerMille is 0..1000; 0 when Off/Shadow.
+                    format: int32
+                    maximum: 1000
+                    minimum: 0
+                    type: integer
+                required:
+                - mode
+                - weightPerMille
+                type: object
+                x-kubernetes-validations:
+                - message: 'V4: Off and Shadow modes require weight 0'
+                  rule: self.mode == 'Active' || self.weightPerMille == 0
+                - message: 'V8: exclude.selector.matchExpressions is unsupported in
+                    M1'
+                  rule: '!has(self.exclude) || !has(self.exclude.selector) || !has(self.exclude.selector.matchExpressions)
+                    || size(self.exclude.selector.matchExpressions) == 0'
+              epoch:
+                description: Epoch is writer-assigned and strictly increasing per
+                  plan UID.
+                format: int64
+                type: integer
+              key:
+                description: 'Key selects the shard identity. M1: only "namespace".'
+                enum:
+                - namespace
+                type: string
+              rollout:
+                description: |-
+                  Rollout is the opaque orchestrator-set rollout ID. A fresh
+                  rollout (changed frozen tuple) must mint a fresh ID.
+                type: string
+              seed:
+                description: Seed fixes the hash window for the rollout. Non-empty.
+                minLength: 1
+                type: string
+              singletonOwner:
+                description: SingletonOwner selects which track runs singleton work.
+                enum:
+                - stable
+                - canary
+                type: string
+              tracks:
+                description: Tracks maps track names to revisions.
+                properties:
+                  canary:
+                    description: Canary is absent when no canary revision is deployed.
+                    properties:
+                      revision:
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - revision
+                    type: object
+                  stable:
+                    description: |-
+                      TrackRevision identifies one deployed revision: a non-empty
+                      DNS-1123 label (V5/V6).
+                    properties:
+                      revision:
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - revision
+                    type: object
+                required:
+                - stable
+                type: object
+            required:
+            - canary
+            - epoch
+            - key
+            - rollout
+            - seed
+            - singletonOwner
+            - tracks
+            type: object
+            x-kubernetes-validations:
+            - message: 'V9: epoch must never decrease'
+              rule: '!has(oldSelf.epoch) || self.epoch >= oldSelf.epoch'
+            - message: 'V6: Active and Shadow modes require tracks.canary.revision'
+              rule: self.canary.mode == 'Off' || has(self.tracks.canary)
+            - message: 'V7: singletonOwner canary requires tracks.canary.revision'
+              rule: self.singletonOwner == 'stable' || has(self.tracks.canary)
+          status:
+            description: |-
+              ShardPlanStatus carries per-track handshake state. Each track's
+              leader owns exactly its own entry. See spec sections 4-5.
+            properties:
+              tracks:
+                items:
+                  description: TrackStatus is one track's acknowledgement of one plan
+                    version.
+                  properties:
+                    budget:
+                      description: |-
+                        Budget charges destructive deletes against V11 caps. Only the
+                        owning track writes its own entry's usage (S1); ack publishes
+                        preserve it.
+                      properties:
+                        deletionsUsed:
+                          format: int32
+                          type: integer
+                        epoch:
+                          format: int64
+                          type: integer
+                      required:
+                      - epoch
+                      type: object
+                    conditions:
+                      items:
+                        description: Condition contains details for one aspect of
+                          the current state of this API Resource.
+                        properties:
+                          lastTransitionTime:
+                            description: |-
+                              lastTransitionTime is the last time the condition transitioned from one status to another.
+                              This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                            format: date-time
+                            type: string
+                          message:
+                            description: |-
+                              message is a human readable message indicating details about the transition.
+                              This may be an empty string.
+                            maxLength: 32768
+                            type: string
+                          observedGeneration:
+                            description: |-
+                              observedGeneration represents the .metadata.generation that the condition was set based upon.
+                              For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                              with respect to the current state of the instance.
+                            format: int64
+                            minimum: 0
+                            type: integer
+                          reason:
+                            description: |-
+                              reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                              Producers of specific condition types may define expected values and meanings for this field,
+                              and whether the values are considered a guaranteed API.
+                              The value should be a CamelCase string.
+                              This field may not be empty.
+                            maxLength: 1024
+                            minLength: 1
+                            pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                            type: string
+                          status:
+                            description: status of the condition, one of True, False,
+                              Unknown.
+                            enum:
+                            - "True"
+                            - "False"
+                            - Unknown
+                            type: string
+                          type:
+                            description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                            maxLength: 316
+                            pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                            type: string
+                        required:
+                        - lastTransitionTime
+                        - message
+                        - reason
+                        - status
+                        - type
+                        type: object
+                      type: array
+                    name:
+                      type: string
+                    observedEpoch:
+                      format: int64
+                      type: integer
+                    observedGeneration:
+                      format: int64
+                      type: integer
+                    ownedNamespaces:
+                      format: int32
+                      type: integer
+                    phase:
+                      description: Phase is Draining, Released, Acquiring, or Acquired.
+                      type: string
+                    planUID:
+                      description: PlanUID binds the ack to one plan object identity.
+                      type: string
+                    released:
+                      type: boolean
+                    releasedWrites:
+                      additionalProperties:
+                        type: string
+                      description: |-
+                        ReleasedWrites maps resource.group to the decimal
+                        resourceVersion of this track's last write of the type.
+                      type: object
+                    revision:
+                      description: |-
+                        Revision is self-reported; acks count only when it matches
+                        the spec revision for this track name.
+                      type: string
+                    rollout:
+                      type: string
+                    session:
+                      description: Session copies the track lease identity at ack
+                        time.
+                      properties:
+                        holder:
+                          type: string
+                        leaseTransitions:
+                          format: int32
+                          type: integer
+                      required:
+                      - holder
+                      - leaseTransitions
+                      type: object
+                  required:
+                  - name
+                  - observedEpoch
+                  - observedGeneration
+                  - phase
+                  - planUID
+                  - released
+                  - revision
+                  - rollout
+                  type: object
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

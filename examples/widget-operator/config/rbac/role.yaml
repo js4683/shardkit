@@ -1,0 +1,73 @@
+# RBAC for the kind demo. The operator reads widgets/namespaces/
+# plans, writes widget + plan status, and runs per-track leader
+# election. It never writes ShardPlan spec (W1). Leases are scoped
+# to the plan namespace (leader election + observer leases both
+# live there); widgets stay cluster-wide because the demo fleet
+# spans namespaces, and events stay cluster-wide because the
+# recorder emits in workload namespaces.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: widget-operator
+  namespace: widget-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: widget-operator
+rules:
+- apiGroups: [shardkit.dev]
+  resources: [widgets]
+  verbs: [get, list, watch, create, update, patch, delete]
+- apiGroups: [shardkit.dev]
+  resources: [widgets/status]
+  verbs: [get, update, patch]
+- apiGroups: [shardkit.dev]
+  resources: [shardplans]
+  verbs: [get, list, watch]
+- apiGroups: [shardkit.dev]
+  resources: [shardplans/status]
+  verbs: [get, update, patch]
+- apiGroups: [""]
+  resources: [namespaces]
+  verbs: [get, list, watch]
+- apiGroups: [""]
+  resources: [events]
+  verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: widget-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: widget-operator
+subjects:
+- kind: ServiceAccount
+  name: widget-operator
+  namespace: widget-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: widget-operator-leases
+  namespace: widget-system
+rules:
+- apiGroups: [coordination.k8s.io]
+  resources: [leases]
+  verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: widget-operator-leases
+  namespace: widget-system
+subjects:
+- kind: ServiceAccount
+  name: widget-operator
+  namespace: widget-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: widget-operator-leases

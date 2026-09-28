@@ -1,0 +1,67 @@
+# Prototype manager deployments for the M0-06 kind experiment: one
+# Deployment per track, each electing its own lease
+# (widget-operator-stable / widget-operator-canary). Images are built
+# and kind-loaded by hack/bring-up.sh; REVISION is baked per image.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: widget-stable
+  namespace: widget-system
+  labels: {track: stable}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: widget-operator, track: stable}
+  template:
+    metadata:
+      labels: {app: widget-operator, track: stable}
+    spec:
+      serviceAccountName: widget-operator
+      containers:
+      - name: manager
+        image: shardkit-widget:rev-a
+        imagePullPolicy: IfNotPresent
+        ports:
+        - {containerPort: 8080, name: metrics, protocol: TCP}
+        env:
+        - {name: TRACK, value: stable}
+        - {name: PLAN_NAMESPACE, value: widget-system}
+        - {name: PLAN_NAME, value: widget-operator}
+        - {name: WRITE_DELAY, value: "0s"}
+        - {name: GUARD_WRITES, value: "true"}
+        - {name: OBSERVER_POLL, value: "1s"}
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {cpu: 500m, memory: 256Mi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: widget-canary
+  namespace: widget-system
+  labels: {track: canary}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: widget-operator, track: canary}
+  template:
+    metadata:
+      labels: {app: widget-operator, track: canary}
+    spec:
+      serviceAccountName: widget-operator
+      containers:
+      - name: manager
+        image: shardkit-widget:rev-b
+        imagePullPolicy: IfNotPresent
+        ports:
+        - {containerPort: 8080, name: metrics, protocol: TCP}
+        env:
+        - {name: TRACK, value: canary}
+        - {name: PLAN_NAMESPACE, value: widget-system}
+        - {name: PLAN_NAME, value: widget-operator}
+        - {name: WRITE_DELAY, value: "0s"}
+        - {name: GUARD_WRITES, value: "true"}
+        - {name: OBSERVER_POLL, value: "1s"}
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {cpu: 500m, memory: 256Mi}

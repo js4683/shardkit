@@ -1,0 +1,14 @@
+# Registers the shardkit traffic-router plugin with the Argo
+# Rollouts controller. Apply over the upstream install (which
+# ships an empty argo-rollouts-config), then restart the
+# controller Deployment. Name and Rollout-side key are both
+# `js4683/shardkit` (see docs/argo-plugin.md).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argo-rollouts-config
+  namespace: argo-rollouts
+data:
+  trafficRouterPlugins: |-
+    - name: "js4683/shardkit"
+      location: "file:///home/argo-rollouts/plugins/shardkit-plugin"

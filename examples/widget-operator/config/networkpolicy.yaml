@@ -1,0 +1,24 @@
+# Example: restrict operator metrics ingress to Prometheus.
+# The operators serve unauthenticated :8080 metrics (standard
+# practice; labels carry rollout metadata only, no sensitive
+# data). In production, apply this to limit scrape access to the
+# monitoring namespace. NOT applied on kind (no policy engine
+# there); validate with `kubectl apply --dry-run=client -f`.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: widget-operator-metrics
+  namespace: widget-system
+spec:
+  podSelector:
+    matchLabels: {app: widget-operator}
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: monitoring}
+      podSelector:
+        matchLabels: {app: prometheus-server}
+    ports:
+    - port: 8080
+      protocol: TCP

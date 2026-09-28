@@ -1,0 +1,16 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+bin/
+artifacts/
+.cache/
+__pycache__/
+*.pyc
+coverage.out
+# M0-06 prototype build output (image context, never committed)
+/examples/widget-operator/widget-operator
+# Prebuilt plugin binary (COPY input for plugins/argo-rollouts/Dockerfile)
+/plugins/argo-rollouts/shardkit-plugin
+# Release binaries + checksums (make release, never committed)
+/dist/
