@@ -1,6 +1,7 @@
 # Contributing
 
-Start with the [M0 backlog](docs/plans/first-two-weeks.md). Design changes must
+Start with [Adopter onboarding](docs/onboarding.md) for behavior context and the
+[roadmap](docs/plans/roadmap.md) for history. Design changes must
 identify the invariant affected, failure scenario, and evidence needed for acceptance.
 Keep unresolved choices in [decisions](docs/decisions.md).
 
@@ -16,10 +17,11 @@ behalf of someone else.
 PR titles follow `NOISSUE - [low|medium|high] - Title` unless an issue number exists.
 Explain context, behavior, tests, risk, and rollback. Safety/API changes are high risk.
 
-Run `make check` for documentation. Once executable behavior exists, add focused
+Run `make check` for documentation. Add focused
 behavioral tests and run the applicable Go, envtest, and kind checks described in
-the [verification plan](docs/plans/verification.md).
-Use no-mistakes for the delivery gate after a real origin is configured. Do not
+the [verification plan](docs/plans/verification.md), summarized as gates in the
+[README](README.md).
+Run those gates locally before pushing. Do not
 create a dummy remote or publish merely to satisfy the gate's prerequisites.
 
 Keep functions cohesive, favor guard clauses, target complexity below 10, and

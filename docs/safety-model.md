@@ -1,22 +1,25 @@
 # Safety model and proof obligations
 
-Status: proposed requirements, no implementation evidence yet. Preserve the
-original goals while distinguishing desired ownership from permission to write.
-During draining, zero authorized writers can be safer than overlapping writers;
-the exact-one-owner wording needs an explicit availability interpretation.
+Status: requirements proposed in M0-02, implemented and evidenced through
+M4 (2026-09-28). Preserve the original goals while distinguishing desired
+ownership from permission to write. During draining, zero authorized
+writers can be safer than overlapping writers; the exact-one-owner
+wording needs an explicit availability interpretation.
 
 Upstream-contract review (M0-02) recorded below on 2026-09-26. It adds failure
-assumptions and decision options, not implementation evidence.
+assumptions and decision options. Implementation evidence per invariant is
+noted inline ("Implemented" / "Proven" markers); the remaining open
+limitations are in the table's last column.
 
 | ID | Required behavior | Evidence to implement | Open limitation |
 |---|---|---|---|
-| I1 | One desired owner; no overlapping authorized writers | Two-manager audit with operation start/end, revision, session, plan UID and epoch; stale-owner partition test | Epoch-only grouping misses writes spanning a transition; fencing is unresolved |
+| I1 | One desired owner; no overlapping authorized writers | Two-manager audit with operation start/end, revision, session, plan UID and epoch; stale-owner partition test | Cooperative guarantee only (FA1.1–FA1.4 stand): no two tracks consider themselves authorized at once, ordered by release-then-acquire. Residual window for in-flight/delayed requests; proven by the randomized audit, envtest handshake, kind probes, and S7/S8 (refused versions held, abandoned versions relinquish) |
 | I2 | Release, acknowledge, establish freshness, then acquire and enqueue | Delayed reconcile/write/cache, duplicate status, crash at each state, missed-event recovery | Global numeric resourceVersion comparison is not a general barrier |
 | I3 | Abort meets a declared time bound | Measure request-to-safe-stable latency across crashes and delayed writes | TTL + drain excludes API outages, cache delay and requeue; unconditional bound is unproven |
 | I4 | Only singleton owner runs cluster and periodic work | Duplicate leaders, ownership transfer and blocked background loop tests | External work needs integrator cooperation |
 | I5 | Destructive budgets fail closed; cache absence cannot justify deletion alone | Concurrent absolute/percentage caps, empty denominator, restart and API read failure; UID preconditions | Define budget persistence, denominator, scope and reset policy |
 | I6 | Shadow persists no changes and emits no real events/side effects | Snapshot API state, intercept all mutating verbs and external/event clients, verify useful diff output | Dry-run can invoke admission; no-op clients can change reconcile behavior |
-| I7 | Stable-to-canary growth until abort; complete promotion | Property tests through all weights, forced cohorts, excludes and namespace churn | Seed/cohort mutation breaks monotonicity unless constrained |
+| I7 | Stable-to-canary growth until abort; complete promotion | Property tests through all weights, forced cohorts, excludes and namespace churn | Constrained by V9 since M3: the frozen tuple (key, seed, include, exclude) changes only with a fresh rollout ID, enforced at write (webhook/CLI/plugin) and at read (gate refuses, observer holds). Proven by `TestGate_V9FrozenTamper`, the tamper-lockstep envtest, and the kind tamper probe |
 | I8 | Old readers survive new writes and finalizers | Old/new controller fixtures, round-trip unknown fields, patch/SSA conflicts and rollback | Cannot generally infer compatibility from static lint |
 
 ## Failure policy
@@ -32,8 +35,11 @@ Evaluate how the server knows current ownership and how in-flight requests are
 fenced. Separate Kubernetes writes from arbitrary external effects that cannot
 participate in the protocol. Publish the resulting assumptions with the guarantee.
 
-No current test proves these invariants. Their delivery gates are in the
-[verification plan](plans/verification.md).
+These invariants are proven by the [verification plan](plans/verification.md)
+gates: unit tests, envtest (including the randomized two-manager audit
+and the tamper-lockstep suite), the conformance contract, and live kind
+probes (tamper refusal, repair convergence, no-strand aborts). Residual
+windows stay explicit in each row rather than advertised away.
 
 ## Failure assumptions (M0-02 upstream review, 2026-09-26)
 

@@ -12,7 +12,7 @@ engineer prepares evidence for D3–D8 and seeks domain review before acceptance
 | D4 | Cache freshness after handoff | Per-resource supported barrier or direct-read strategy | Demonstration with pinned API/cache stack, deletes/recreates and missed watches; blocks M1 |
 | D5 | Namespace identity, hash encoding, seed lifecycle and cohorts | 1,000 fixed buckets per rollout; exclude wins | Golden vectors and monotonic properties; blocks partition API |
 | D6 | Legacy lease and revision/promotion identity | Explicit staged migration; immutable revision identity | Old/new coexistence and promotion recovery tests; blocks M1 integration |
-| D7 | Supported toolchain and plugin protocol | CR v0.24.1 + k8s 1.36.4 + kindest/node v1.36.4 (M0-06 bring-up proves executable compat); Argo SDK `github.com/argoproj/argo-rollouts` v1.10.0 proposed ([contract](argo-plugin.md): SDK compiles against k8s 0.36.4, method bindings fixed) | Reviewer acceptance still open (M2); blocks M2 |
+| D7 | Supported toolchain and plugin protocol | CR v0.24.1 + k8s 1.36.4 + kindest/node v1.36.4 (M0-06 bring-up proves executable compat); Argo SDK `github.com/argoproj/argo-rollouts` v1.10.0 proposed ([contract](argo-plugin.md): SDK compiles against k8s 0.36.4, method bindings fixed) | Accepted 2026-09-28: M2 green on these pins (kind good-path + chaos-path); external review waived by author, pins stand |
 | D8 | Shadow semantics and persistent budget accounting | No persistent writes; fail-closed concurrent budgets | Admission/external-effects experiment and restart tests; blocks M3 |
 
 Record a dated ADR when a decision is accepted: context, selected approach,

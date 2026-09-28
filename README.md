@@ -24,8 +24,8 @@ stale or tampered plan stops all writes instead of causing a split brain.
   other's acknowledgements plus a freshness barrier over write versions.
 - **Operator tooling** — `kubectl-shardplan` CLI (`status`, `explain`,
   `simulate`, `set-weight`, `abort`), an Argo Rollouts traffic-router
-  plugin, shadow diffing, budgets with confirmed deletes, and Prometheus
-  metrics.
+  plugin, shadow diffing, budgets with confirmed deletes, webhook
+  helper, and Prometheus metrics.
 
 ## Quick Start
 
