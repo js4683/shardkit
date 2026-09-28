@@ -3,9 +3,9 @@
 Clone `github.com/js4683/shardkit`; `origin` `main` is protected
 (green CI required, no force pushes, no deletions), so work on
 focused branches and open a pull request. Pins live in
-[decisions](decisions.md): Go 1.27.1, controller-runtime v0.24.1,
-k8s.io v0.36.4, kindest/node:v1.36.4, controller-gen v0.22.0,
-envtest 1.36.x, Argo Rollouts v1.10.0 (plugin demo).
+[decisions](decisions.md): Go 1.27.1, controller-runtime v0.25.1,
+k8s.io v0.37.1, kindest/node:v1.37.0, controller-gen v0.22.0,
+envtest 1.37.x, Argo Rollouts v1.10.0 (plugin demo).
 
 ## Gates (run before every PR)
 
@@ -13,7 +13,7 @@ envtest 1.36.x, Argo Rollouts v1.10.0 (plugin demo).
 gofmt -l . && go vet ./... && go test ./... -count=1
 make check        # docs links + whitespace
 make test-envtest # real API server; provision binaries first:
-eval $(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.24.1 use -p env 1.36.x)
+eval $(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.24.1 use -p env 1.37.x)
 make manifests generate  # must leave the tree clean (CI enforces it)
 ```
 

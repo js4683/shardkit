@@ -53,6 +53,6 @@ jobs:
       - name: install setup-envtest
         run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.24.1
       - name: fetch envtest binaries
-        run: echo "KUBEBUILDER_ASSETS=$($(go env GOPATH)/bin/setup-envtest use -p path 1.36.x)" >> "$GITHUB_ENV"
+        run: echo "KUBEBUILDER_ASSETS=$($(go env GOPATH)/bin/setup-envtest use -p path 1.37.x)" >> "$GITHUB_ENV"
       - name: envtest suite
         run: make test-envtest

@@ -51,8 +51,8 @@ testing, no fuzzing beyond the existing randomized audit.
 - **CLI trust**: standard kubeconfig chain with explicit
   `--kubeconfig`/`--context`, fails closed on load errors, no
   impersonation flags — it cannot exceed the user's own creds.
-- **Supply chain**: go 1.27.1, k8s.io 0.36.4, controller-runtime
-  0.24.1, Argo Rollouts v1.10.0, `alpine:3.21`, kindest node pin;
+- **Supply chain**: go 1.27.1, k8s.io 0.37.1, controller-runtime
+  0.25.1, Argo Rollouts v1.10.0, `alpine:3.21`, kindest node pin;
   committed `go.sum`; release SHA256SUMS verified.
 
 ## Residual risk
