@@ -21,10 +21,13 @@ direction with evidence, not an acceptance.
   `rollouts-plugin-trafficrouter/rpc/v2` module; the earlier
   `/v2` path does not exist on the proxy or pkg.go.dev.
 - v1.10.0 itself builds on k8s.io v0.34.5, but MVS keeps our
-  v0.36.4 pins: the three SDK packages were compiled against
-  k8s.io v0.36.4 in a scratch module (`SKEW-BUILD-OK`, no source
-  incompatibilities). The plugin side never imports the
-  controller-side `plugin` package (client-go, `utils/record`).
+  v0.37.1 pins: the three SDK packages compile against k8s.io
+  v0.37.1 (`SKEW-BUILD-OK`, re-verified by full `go build ./...`
+  on the 0.37 upgrade; no source incompatibilities, including
+  the 0.37 removal of `scheduling/v1alpha2`, which the plugin's
+  transitive closure does not import). The plugin side never
+  imports the controller-side `plugin` package (client-go,
+  `utils/record`).
 - The plugin serves over hashicorp `go-plugin` (net/rpc + gob,
   pulled in by the `rpc` package), exactly like the upstream
   `test/cmd/trafficrouter-plugin-sample`. Gob names must match

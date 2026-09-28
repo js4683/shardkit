@@ -28,7 +28,7 @@ manifests:
 	$(CONTROLLER_GEN) crd paths=./api/... output:crd:dir=config/crd
 generate:
 	$(CONTROLLER_GEN) object paths=./api/...
-# Hermetic API-server tests (envtest 1.36.x). Unit-only `make test`
+# Hermetic API-server tests (envtest 1.37.x). Unit-only `make test`
 # skips this package when KUBEBUILDER_ASSETS is unset.
 test-envtest:
-	KUBEBUILDER_ASSETS="$${KUBEBUILDER_ASSETS:?set via eval $$(setup-envtest use -p env 1.36.x)}" go test ./test/envtest/...
+	KUBEBUILDER_ASSETS="$${KUBEBUILDER_ASSETS:?set via eval $$(setup-envtest use -p env 1.37.x)}" go test ./test/envtest/...

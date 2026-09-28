@@ -34,8 +34,8 @@ docker build -q --build-arg REVISION=rev-b -t shardkit-widget:rev-b -f Dockerfil
 if kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
   echo "==> cluster $CLUSTER exists, reusing"
 else
-  echo "==> create cluster $CLUSTER (kindest/node:v1.36.4)"
-  kind create cluster --name "$CLUSTER" --image kindest/node:v1.36.4 --wait 5m
+  echo "==> create cluster $CLUSTER (kindest/node:v1.37.0)"
+  kind create cluster --name "$CLUSTER" --image kindest/node:v1.37.0 --wait 5m
 fi
 
 echo "==> load images"
