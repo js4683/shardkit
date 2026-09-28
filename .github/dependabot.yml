@@ -1,11 +1,18 @@
-# Dependabot: weekly Go module + workflow updates.
+# Dependabot: weekly Go module + workflow updates. The k8s.io and
+# sigs.k8s.io modules move as one group: they only resolve in
+# lockstep (updating k8s.io/api alone breaks `go mod tidy` against
+# the pinned client-go), and controller-runtime pairs with a k8s
+# minor.
 version: 2
 updates:
-- package-ecosystem: gomod
-  directory: /
-  schedule: {interval: weekly}
-  labels: [dependencies]
-- package-ecosystem: github-actions
-  directory: /
-  schedule: {interval: weekly}
-  labels: [dependencies]
+  - package-ecosystem: gomod
+    directory: /
+    schedule: {interval: weekly}
+    labels: [dependencies]
+    groups:
+      kubernetes:
+        patterns: [k8s.io/*, sigs.k8s.io/*]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly}
+    labels: [dependencies]
