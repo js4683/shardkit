@@ -1,42 +1,64 @@
 # shardkit
 
-Progressive delivery for leader-elected Kubernetes controllers: assign a controlled
-slice of objects to a canary revision, observe it, then expand or abort.
+[![CI](https://github.com/js4683/shardkit/actions/workflows/ci.yml/badge.svg)](https://github.com/js4683/shardkit/actions/workflows/ci.yml)
 
-**Status: M0 done; M1 library and CLI in progress.** The ShardPlan API, the
-partition/gate/guarded-client/observer library, and the `kubectl-shardplan`
-CLI are implemented and tested (unit, envtest, kind smoke). Metrics, the
-widget integration, and the Argo plugin are pending. The working name and
-API are provisional; this repository is not an installable operator yet.
+Fleet-safe canary ownership for Kubernetes operators: run two copies of your
+controller (stable + canary) and let a `ShardPlan` decide which namespaces
+each copy reconciles, with fenced handoffs, acked epochs, and fail-closed
+reads.
 
-## Start here
+**Status: M0–M4 + hardening done.** ShardPlan API, Go library (ownership
+gate, guarded client, handshake observer, budgets, shadow diff, admission
+helper), `kubectl-shardplan` CLI, Argo Rollouts traffic-router plugin, and a
+runnable kind demo — unit, envtest, and live-probe verified. See the
+[roadmap](docs/plans/roadmap.md) and [verification notes](docs/plans/verification.md).
 
-1. Read the [original brief](docs/project-brief.md) and [design draft](docs/design.md).
-2. Review the [safety model](docs/safety-model.md), especially the unresolved fencing proof.
-3. Work through the [first two weeks](docs/plans/first-two-weeks.md).
-4. Track subsequent work in the [milestones](docs/plans/roadmap.md).
+## Layout
 
-Operators drive rollouts with the [CLI](docs/cli.md) (`status`, `explain`,
-`simulate`, `set-weight`, `abort`).
+- `api/` — ShardPlan/Widget CRD types + V1–V11 validation (source of truth;
+  CRDs in `config/crd/` regenerate via `make manifests`).
+- `pkg/shardkit/` — the library: gate, guarded client, observer, leases,
+  freshness barrier, budgets, shadow diff, metrics, webhook helper.
+- `pkg/partition/` — the pure ownership function the gate enforces and the
+  CLI simulates.
+- `cmd/kubectl-shardplan/` — operator CLI (`status`, `explain`, `simulate`,
+  `set-weight`, `abort`).
+- `plugins/argo-rollouts/` — traffic-router plugin so Argo Rollouts steps
+  drive the plan.
+- `examples/widget-operator/` — runnable two-track demo on kind
+  (`hack/bring-up.sh`, `hack/demo.sh`).
+- `test/conformance/` — adopter contract; `test/envtest/` — real-API-server
+  suite including the randomized two-manager audit.
+- `docs/` — specs, onboarding, traces, security review.
 
-From this directory, run `make check` to validate local documentation links and
-whitespace. It requires Python 3 and Make, and performs no network or cluster writes.
-See [development setup](docs/development.md) for tool inventory and implementation gates.
+## Quickstart
 
-## Scope
+Prereqs: Go 1.27.1, `kind`, `kubectl`, Docker (pins in
+[decisions](docs/decisions.md)).
 
-The planned core is a controller-runtime Go library, an orchestrator-independent
-ShardPlan API, and a manual CLI. Argo Rollouts supplies promotion steps and analysis
-through a thin traffic-router plugin. Full caches are the initial design.
+```sh
+./examples/widget-operator/hack/bring-up.sh   # kind cluster, CRD, both operators, 20 widgets
+./examples/widget-operator/hack/demo.sh       # CLI rollout to 50%, explain, abort, re-converge
+```
 
-HTTP traffic delivery, throughput sharding, fleet promotion, and canarying CRDs,
-RBAC, or webhook configurations are outside the core. A later webhook helper is
-an explicitly separate experiment, not permission to roll out incompatible schemas.
+Then follow [Adopter onboarding](docs/onboarding.md) to drive handoffs
+yourself and wire the library into your own operator.
 
-## Contributing
+## Verification
 
-See [CONTRIBUTING](CONTRIBUTING.md), [decisions](docs/decisions.md), and
-[security guidance](SECURITY.md). MIT on GitHub is the decided license and host;
-confirm the owner/module path and employer/IP clearance before implementation
-or publication.
-The repository has no remote or public release configured.
+```sh
+make check        # docs links + whitespace (28 files)
+gofmt -l . && go vet ./... && go test ./...   # unit gate
+make test-envtest # real API server (needs KUBEBUILDER_ASSETS via setup-envtest 1.36.x)
+make release      # release matrix + verified SHA256SUMS (output in gitignored dist/)
+```
+
+CI runs all of the above plus a codegen-clean check on every push and pull
+request. Tagging `v*` builds and attaches release binaries.
+
+## Governance
+
+MIT ([LICENSE](LICENSE)) · [Code of Conduct](CODE_OF_CONDUCT.md)
+(Kubernetes/CNCF) · [Contributing](CONTRIBUTING.md) (DCO sign-off required:
+`git commit -s`) · [Security](SECURITY.md) (private advisories; see the
+[self security review](docs/security-review.md)) · Owners: [OWNERS](OWNERS).

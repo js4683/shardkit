@@ -42,8 +42,8 @@ spec:
             description: |-
               ShardPlanSpec defines the desired rollout state. Writers own this;
               the library only reads it. See docs/shardplan-spec.md sections 1-3.
-              CEL rules mirror library validation V1-V9 as defense in depth;
-              library validation stays authoritative for reads.
+              CEL rules mirror library validation V1-V9 plus V11 range rules as
+              defense in depth; library validation stays authoritative.
             properties:
               budget:
                 description: |-

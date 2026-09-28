@@ -1,0 +1,58 @@
+# CI mirrors the local gates (see README "Verification"): format,
+# vet, build, unit tests, docs check, codegen-clean, and the full
+# envtest suite against a real API server.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: gofmt
+        run: gofmt -l . | tee /tmp/gofmt.out && test ! -s /tmp/gofmt.out
+      - name: vet
+        run: go vet ./...
+      - name: build
+        run: go build ./...
+      - name: unit tests
+        run: go test ./... -count=1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: docs check
+        run: make check
+
+  codegen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: manifests and deepcopy are current
+        run: make manifests generate && git diff --exit-code -- config/ api/
+
+  envtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: install setup-envtest
+        run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.24.1
+      - name: fetch envtest binaries
+        run: echo "KUBEBUILDER_ASSETS=$($(go env GOPATH)/bin/setup-envtest use -p path 1.36.x)" >> "$GITHUB_ENV"
+      - name: envtest suite
+        run: make test-envtest
