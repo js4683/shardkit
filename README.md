@@ -2,38 +2,19 @@
 
 [![CI](https://github.com/js4683/shardkit/actions/workflows/ci.yml/badge.svg)](https://github.com/js4683/shardkit/actions/workflows/ci.yml)
 
-Fleet-safe canary ownership for Kubernetes operators: run two copies of your
-controller (stable + canary) and let a `ShardPlan` decide which namespaces
-each copy reconciles, with fenced handoffs, acked epochs, and fail-closed
-reads.
+Canary releases for Kubernetes operators, done safely. You run two copies of
+your controller — the current revision and the candidate — and a `ShardPlan`
+says which namespaces each copy reconciles. Shardkit moves namespaces between
+the two copies with a handshake, so both sides agree on every handoff and a
+stale or tampered plan stops all writes instead of causing a split brain.
 
-**Status: M0–M4 + hardening done.** ShardPlan API, Go library (ownership
-gate, guarded client, handshake observer, budgets, shadow diff, admission
-helper), `kubectl-shardplan` CLI, Argo Rollouts traffic-router plugin, and a
-runnable kind demo — unit, envtest, and live-probe verified. See the
-[roadmap](docs/plans/roadmap.md) and [verification notes](docs/plans/verification.md).
+**Status:** M0–M4 + hardening complete and released ([v0.2.0](https://github.com/js4683/shardkit/releases/tag/v0.2.0)).
+See the [roadmap](docs/plans/roadmap.md) for history and
+[verification notes](docs/plans/verification.md) for how it was tested.
 
-## Layout
+## Try it in 5 minutes
 
-- `api/` — ShardPlan/Widget CRD types + V1–V11 validation (source of truth;
-  CRDs in `config/crd/` regenerate via `make manifests`).
-- `pkg/shardkit/` — the library: gate, guarded client, observer, leases,
-  freshness barrier, budgets, shadow diff, metrics, webhook helper.
-- `pkg/partition/` — the pure ownership function the gate enforces and the
-  CLI simulates.
-- `cmd/kubectl-shardplan/` — operator CLI (`status`, `explain`, `simulate`,
-  `set-weight`, `abort`).
-- `plugins/argo-rollouts/` — traffic-router plugin so Argo Rollouts steps
-  drive the plan.
-- `examples/widget-operator/` — runnable two-track demo on kind
-  (`hack/bring-up.sh`, `hack/demo.sh`).
-- `test/conformance/` — adopter contract; `test/envtest/` — real-API-server
-  suite including the randomized two-manager audit.
-- `docs/` — specs, onboarding, traces, security review.
-
-## Quickstart
-
-Prereqs: Go 1.27.1, `kind`, `kubectl`, Docker (pins in
+You need Go 1.27.1, `kind`, `kubectl`, and Docker (full pins in
 [decisions](docs/decisions.md)).
 
 ```sh
@@ -41,13 +22,35 @@ Prereqs: Go 1.27.1, `kind`, `kubectl`, Docker (pins in
 ./examples/widget-operator/hack/demo.sh       # CLI rollout to 50%, explain, abort, re-converge
 ```
 
-Then follow [Adopter onboarding](docs/onboarding.md) to drive handoffs
-yourself and wire the library into your own operator.
+`demo.sh` prints a verdict after every step and ends at rest (`Off`, stable
+owns everything). If any step fails, stop — the failure is a real bug, not a
+flake to re-run past.
 
-## Verification
+Next: [Adopter onboarding](docs/onboarding.md) walks you through driving a
+handoff yourself and wiring the library into your own operator.
+
+## How it fits together
+
+- `api/` — the ShardPlan/Widget CRD types and validation rules
+  (source of truth; CRDs in `config/crd/` regenerate with `make manifests`).
+- `pkg/shardkit/` — the library your operator links: ownership gate,
+  guarded client, handshake observer, budgets, shadow diff, metrics.
+- `pkg/partition/` — the pure ownership function both the gate and the
+  CLI simulate with, so previews match enforcement exactly.
+- `cmd/kubectl-shardplan/` — the operator CLI (`status`, `explain`,
+  `simulate`, `set-weight`, `abort`).
+- `plugins/argo-rollouts/` — lets Argo Rollouts steps drive the plan.
+- `examples/widget-operator/` — the runnable two-track demo used above.
+- `test/conformance/` + `test/envtest/` — the adopter contract and the
+  real-API-server suite, including a randomized two-manager audit.
+
+The safety argument lives in [safety-model](docs/safety-model.md); the full
+contract is [shardplan-spec](docs/shardplan-spec.md).
+
+## Checking your own changes
 
 ```sh
-make check        # docs links + whitespace (28 files)
+make check        # docs links + whitespace
 gofmt -l . && go vet ./... && go test ./...   # unit gate
 make test-envtest # real API server (needs KUBEBUILDER_ASSETS via setup-envtest 1.36.x)
 make release      # release matrix + verified SHA256SUMS (output in gitignored dist/)
@@ -56,9 +59,11 @@ make release      # release matrix + verified SHA256SUMS (output in gitignored d
 CI runs all of the above plus a codegen-clean check on every push and pull
 request. Tagging `v*` builds and attaches release binaries.
 
-## Governance
+## Governance and help
 
-MIT ([LICENSE](LICENSE)) · [Code of Conduct](CODE_OF_CONDUCT.md)
-(Kubernetes/CNCF) · [Contributing](CONTRIBUTING.md) (DCO sign-off required:
-`git commit -s`) · [Security](SECURITY.md) (private advisories; see the
-[self security review](docs/security-review.md)) · Owners: [OWNERS](OWNERS).
+- MIT ([LICENSE](LICENSE)); owners in [OWNERS](OWNERS).
+- [Code of Conduct](CODE_OF_CONDUCT.md) (Kubernetes/CNCF).
+- [Contributing](CONTRIBUTING.md) — DCO sign-off required (`git commit -s`).
+- Questions or bugs: [open an issue](https://github.com/js4683/shardkit/issues).
+- Security-sensitive: follow [SECURITY](SECURITY.md) (private advisories),
+  never a public issue. Background: [self security review](docs/security-review.md).
