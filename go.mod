@@ -4,7 +4,7 @@ go 1.27.1
 
 require (
 	github.com/argoproj/argo-rollouts v1.10.0
-	github.com/hashicorp/go-plugin v1.7.0
+	github.com/hashicorp/go-plugin v1.8.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.3
 	k8s.io/api v0.36.4
