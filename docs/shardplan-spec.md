@@ -229,6 +229,11 @@ One transition is one valid spec version (UID, generation, epoch).
 The observer algorithm per track leader:
 
 1. T1 Observe and validate (V1–V11). Invalid → B4. Stale → ignore.
+   Schema-valid but contract-violating versions (same-UID versions
+   failing `ValidateTransition`) are refused and held: the observer
+   advances only versions the gate adopts (read-time V9), so acks
+   freeze instead of handshaking a version whose writes would be
+   denied.
 2. T2 Compute desired ownership (partition spec) and the
    delta against currently held namespaces.
 3. T3 If relinquishing: stop dequeuing relinquished work at
@@ -242,7 +247,12 @@ The observer algorithm per track leader:
    alternative), then set `phase: Acquired` and enqueue gained
    namespaces at a bounded rate.
 5. T5 Supersede (S10) or timeout at any step returns to T1 or to
-   degraded respectively; timed-out acquisition never writes.
+   degraded respectively; timed-out acquisition never writes. An
+   abandoned acquisition still relinquishes: its release phase ran,
+   so held narrows to the abandoned grant and the gains stay
+   deferred — the next version acquires the union behind the
+   loser's fresh release, whose evidence still fences the
+   abandoned version's writes.
 
 Crash recovery falls out of the rules: release acks are persisted
 before acquisition, acks are idempotent (S4), and a new leader
@@ -288,18 +298,15 @@ unbounded, so plans without budgets behave as before.
   preserve every other field), so the two read-modify-write loops
   never wipe each other; RV conflicts retry on both sides.
 
-## 10. Open points for M1
+## 10. Open points (M1 items resolved)
 
-- D6: per-track lease names, legacy-lease staged migration, and
-  promotion lease continuity. This spec fixes the ack `session`
-  fields; the lease objects they read are M1 work.
-- Timeout values: drain, handoff-acquire, status-publish. M1
-  tunes them; `abortScaleDownDelaySeconds` must cover the abort
-  bound derived from them (I3).
-- CRD CEL hardening for V1–V9 plus the V11 range rules (epoch via `oldSelf`) as
-  defense in depth; library-side validation stays authoritative
-  for reads.
-- `releasedWrites` recording for every watched type, including
+- D6: resolved — per-track leases live in the plan namespace and
+  the ack `session` fields read them live (S8).
+- Timeout values: tuned in M1 (observer defaults: 1s poll, 30s
+  drain, 5m acquire, 10s status publish).
+- CRD CEL hardening for V1–V9 plus the V11 range rules as defense
+  in depth; library-side validation stays authoritative for reads.
+- `releasedWrites` recording covers every watched type, including
   types the track never writes (absent entry).
-- `matchExpressions` and non-`namespace` keys stay rejected
-  until specified and implemented.
+- Still open: `matchExpressions` and non-`namespace` keys stay
+  rejected until specified and implemented.

@@ -1,0 +1,27 @@
+# CD: tag v* to build the release matrix and attach it to a GitHub
+# Release. Nothing deploys anywhere — the artifacts are the CLI and
+# plugin binaries plus verified SHA256SUMS.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: build release matrix
+        run: make release VERSION=${{ github.ref_name }}
+      - name: create release with binaries
+        run: gh release create ${{ github.ref_name }} --generate-notes dist/kubectl-shardplan-* dist/shardkit-plugin-* dist/SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}

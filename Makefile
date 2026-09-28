@@ -1,5 +1,5 @@
 .PHONY: check test test-envtest manifests generate release
-VERSION ?= v0.2.0-dev
+VERSION ?= v0.2.0
 # Release binaries with checksums (M2 exit). CLI ships for the two
 # desktop/server OSes; the plugin only runs inside the Linux
 # Rollouts controller image, so it builds for Linux only. dist/ is

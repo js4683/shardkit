@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -529,6 +530,11 @@ func TestSetWeight_ConflictExhausted(t *testing.T) {
 }
 
 func TestRun_Dispatch(t *testing.T) {
+	// Hermetic kubeconfig: usage, help, and argument errors must
+	// resolve before any cluster contact, so none of these cases
+	// may depend on ambient credentials (caught by CI, which has
+	// no kubeconfig at all).
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "missing"))
 	cases := []struct {
 		name string
 		args []string

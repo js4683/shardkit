@@ -83,6 +83,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if !ok {
 		return 2
 	}
+	if wantHelp(cargs) {
+		// Usage is already printed; run the no-op exec without
+		// building a client, so --help works with no kubeconfig.
+		return exec(context.Background(), nil, "", stdout, stderr)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	c, ns, err := buildClient(g)
