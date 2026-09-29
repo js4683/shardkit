@@ -3,6 +3,8 @@ package shardkit
 import (
 	"context"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -561,6 +563,129 @@ func TestExternalHold(t *testing.T) {
 	g.SetExternalHold(nil)
 	if obs, err := g.Owned(ctx, "default"); err != nil || !obs.Owned {
 		t.Fatalf("obs = %+v err = %v, want owned after clear", obs, err)
+	}
+}
+
+// stormReader counts Gets by kind and blocks plan reads until
+// released, so a storm of concurrent Owned calls piles onto one
+// shared flight. Arming starts after attach (attach itself reads
+// through).
+type stormReader struct {
+	client.Reader
+	armed   atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	mu      sync.Mutex
+	plans   int
+}
+
+func (r *stormReader) Get(ctx context.Context, key types.NamespacedName, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*v1alpha1.ShardPlan); ok {
+		r.mu.Lock()
+		r.plans++
+		r.mu.Unlock()
+		if r.armed.Load() {
+			r.once.Do(func() { close(r.entered) })
+			select {
+			case <-r.release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
+}
+
+func (r *stormReader) planReads() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.plans
+}
+
+// TestGate_StormSharesReads pins the singleflight contract: 100
+// concurrent Owned calls share a handful of plan reads (one per
+// pile-up, not one per call), every caller still observes the same
+// live version, and sequential calls always re-read (sharing is
+// in-flight only — never a cache).
+func TestGate_StormSharesReads(t *testing.T) {
+	ctx := context.Background()
+	sr := &stormReader{Reader: fixture(t, nil),
+		entered: make(chan struct{}), release: make(chan struct{})}
+	g, err := Attach(ctx, sr, planKey, "stable", "rev-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sr.armed.Store(true)
+	const n = 100
+	ready := make(chan struct{}, n)
+	done := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			ready <- struct{}{}
+			_, err := g.Owned(ctx, "demo-87")
+			done <- err
+		}()
+	}
+	for i := 0; i < n; i++ {
+		select {
+		case <-ready:
+		case <-time.After(10 * time.Second):
+			t.Fatal("storm goroutines never started")
+		}
+	}
+	select {
+	case <-sr.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no plan read entered the delegate")
+	}
+	// Every goroutine is scheduled and running; reaching the flight
+	// takes microseconds, so this window piles the whole storm onto
+	// the blocked leader with overwhelming margin.
+	time.Sleep(time.Second)
+	close(sr.release)
+	for i := 0; i < n; i++ {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("storm call: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("storm call never returned")
+		}
+	}
+	if plans := sr.planReads(); plans > 5 {
+		t.Fatalf("storm plan reads = %d, want a shared handful (<=5 for 100 calls)", plans)
+	} else {
+		t.Logf("storm plan reads = %d for 100 calls", plans)
+	}
+	// Sequential calls never share: each observes live, so a flip
+	// between two calls is visible to the second.
+	sr.armed.Store(false)
+	before := sr.planReads()
+	for i := 0; i < 5; i++ {
+		if _, err := g.Owned(ctx, "demo-87"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := sr.planReads() - before; got != 5 {
+		t.Fatalf("sequential plan reads = %d, want exactly 5 (no caching)", got)
+	}
+}
+
+// TestGate_CanceledContext pins fail-closed cancellation: an Owned
+// call whose context already expired fails instead of evaluating.
+func TestGate_CanceledContext(t *testing.T) {
+	g, err := Attach(context.Background(), fixture(t, nil), planKey, "stable", "rev-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := g.Owned(ctx, "demo-87"); err == nil {
+		t.Fatal("canceled Owned: nil error, want fail-closed")
+	} else if _, ok := AsClosed(err); !ok {
+		t.Fatalf("canceled Owned err = %v, want ClosedError", err)
 	}
 }
 
