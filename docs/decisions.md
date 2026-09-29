@@ -6,7 +6,7 @@ engineer prepares evidence for D3–D8 and seeks domain review before acceptance
 
 | ID | Decision | Proposed direction | Required evidence / blocking milestone |
 |---|---|---|---|
-| D1 | Employer/IP clearance and license | MIT on GitHub, no employer clearance needed (author, 2026-09-26) | MIT license text before release |
+| D1 | Employer/IP clearance and license | Apache-2.0 on GitHub (supersedes MIT 2026-09-29 per external review: CNCF adjacency + patent grant); no employer clearance needed (author, 2026-09-26) | License text in repo (done) |
 | D2 | Name, public owner and module path | Owner js4683; module github.com/js4683/shardkit (author, 2026-09-26) | Name free under account (404 on 2026-09-26); module path agreed, unblocks M0-04 |
 | D3 | Exclusivity, fencing and crash takeover | Fail closed on unproven release; specify cooperative guarantee | Delayed-write and partition model plus external review; blocks M1 safety claim |
 | D4 | Cache freshness after handoff | Per-resource supported barrier or direct-read strategy | Demonstration with pinned API/cache stack, deletes/recreates and missed watches; blocks M1 |

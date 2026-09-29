@@ -50,6 +50,14 @@ func mkRollout() *rolloutv1alpha1.Rollout {
 	}
 }
 
+func mkRolloutWithMax(max int32) *rolloutv1alpha1.Rollout {
+	r := mkRollout()
+	r.Spec.Strategy.Canary = &rolloutv1alpha1.CanaryStrategy{
+		TrafficRouting: &rolloutv1alpha1.RolloutTrafficRouting{MaxTrafficWeight: &max},
+	}
+	return r
+}
+
 // mkBoundPlan returns a valid Active plan bound to mkRollout;
 // mutate adjusts it before use.
 func mkBoundPlan(mutate func(*v1alpha1.ShardPlan)) *v1alpha1.ShardPlan {
@@ -196,6 +204,38 @@ func TestPlugin_SetWeight(t *testing.T) {
 			}
 		}
 	})
+	t.Run("scales permille by maxTrafficWeight", func(t *testing.T) {
+		p := pluginFixture(t, mkBoundPlan(nil))
+		ro := mkRolloutWithMax(1000)
+		if err := p.SetWeight(ro, 1, nil); err.HasError() {
+			t.Fatalf("SetWeight: %v", err)
+		}
+		if got := getPlan(t, p); got.Spec.Canary.WeightPerMille != 1 {
+			t.Fatalf("weight = %d, want 1 (0.1%% step)", got.Spec.Canary.WeightPerMille)
+		}
+		if err := p.SetWeight(ro, 1000, nil); err.HasError() {
+			t.Fatalf("SetWeight: %v", err)
+		}
+		if got := getPlan(t, p); got.Spec.Canary.WeightPerMille != 1000 {
+			t.Fatalf("weight = %d, want 1000", got.Spec.Canary.WeightPerMille)
+		}
+		for _, w := range []int32{-1, 1001} {
+			if err := p.SetWeight(ro, w, nil); !err.HasError() {
+				t.Fatalf("weight %d must fail against max 1000", w)
+			}
+		}
+	})
+	t.Run("rejects inexact scale", func(t *testing.T) {
+		p := pluginFixture(t, mkBoundPlan(nil))
+		for _, max := range []int32{0, 3, -100} {
+			if err := p.SetWeight(mkRolloutWithMax(max), 1, nil); !err.HasError() {
+				t.Fatalf("maxTrafficWeight %d must fail closed", max)
+			}
+		}
+		if got := getPlan(t, p); got.Spec.Epoch != 3 {
+			t.Fatalf("refused scale wrote epoch %d", got.Spec.Epoch)
+		}
+	})
 }
 
 func TestPlugin_VerifyWeight(t *testing.T) {
@@ -241,6 +281,21 @@ func TestPlugin_VerifyWeight(t *testing.T) {
 		addl := []rolloutv1alpha1.WeightDestination{{Weight: 1}}
 		if _, err := p.VerifyWeight(mkRollout(), 10, addl); !err.HasError() {
 			t.Fatal("additional destinations must fail closed")
+		}
+	})
+	t.Run("verifies against scaled weight", func(t *testing.T) {
+		one := mkBoundPlan(func(p *v1alpha1.ShardPlan) { p.Spec.Canary.WeightPerMille = 1 })
+		p := pluginFixture(t, one)
+		setPlanEntries(t, p, ackEntries()...)
+		ro := mkRolloutWithMax(1000)
+		if v, err := p.VerifyWeight(ro, 1, nil); err.HasError() || v != pluginTypes.Verified {
+			t.Fatalf("got %v err %v, want Verified", v, err)
+		}
+		if v, _ := p.VerifyWeight(ro, 2, nil); v != pluginTypes.NotVerified {
+			t.Fatalf("wrong scaled weight reported %v", v)
+		}
+		if _, err := p.VerifyWeight(mkRolloutWithMax(3), 1, nil); !err.HasError() {
+			t.Fatal("inexact scale must fail closed")
 		}
 	})
 }
