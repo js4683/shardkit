@@ -5,9 +5,9 @@ Start with [Adopter onboarding](docs/onboarding.md) for behavior context and the
 identify the invariant affected, failure scenario, and evidence needed for acceptance.
 Keep unresolved choices in [decisions](docs/decisions.md).
 
-Owner `js4683`, module `github.com/js4683/shardkit`, MIT license
-(adopted 2026-09-26, text in [LICENSE](LICENSE) with the copyright
-holder), DCO sign-off (adopted 2026-09-28), [OWNERS](OWNERS),
+Owner `js4683`, module `github.com/js4683/shardkit`, Apache-2.0 license
+(adopted 2026-09-29, superseding MIT per external review; text in
+[LICENSE](LICENSE)), DCO sign-off (adopted 2026-09-28), [OWNERS](OWNERS),
 [code of conduct](CODE_OF_CONDUCT.md), and [security
 policy](SECURITY.md) with private reporting are all in place.
 

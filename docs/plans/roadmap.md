@@ -48,6 +48,6 @@ The webhook helper does not relax compatibility rules for cluster-global resourc
 
 During M0 prepare a design review packet for Argo, controller-runtime, and sharding
 maintainers; sending it requires author approval. Before publication establish
-MIT license text, DCO, OWNERS, conduct enforcement and private reporting. Recruit a second
+Apache-2.0 license text, DCO, OWNERS, conduct enforcement and private reporting. Recruit a second
 maintainer before v0.3. Plan the M2 demo blog and conference proposal after working
 evidence exists. Consider splitting the plugin only after its interface stabilizes.

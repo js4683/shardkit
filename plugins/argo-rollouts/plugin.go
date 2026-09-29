@@ -105,9 +105,30 @@ func (p *Plugin) UpdateHash(rollout *rolloutv1alpha1.Rollout, canaryHash, stable
 	return pluginTypes.RpcError{}
 }
 
-// SetWeight moves the bound plan to weight w (percent) as a new
-// epoch: Active at w*10 per mille for w > 0, Off at 0 for w == 0.
-// An already-matching plan is a no-op, not a new epoch.
+// trafficScale reads the rollout's maxTrafficWeight (default 100):
+// desired weights count in units of (1000/max) per mille, so the
+// default moves in whole percents while maxTrafficWeight 1000
+// allows 0.1% steps. Granularities that do not divide 1000 evenly
+// fail closed — the plan cannot represent them exactly.
+func trafficScale(rollout *rolloutv1alpha1.Rollout) (int32, pluginTypes.RpcError) {
+	maxWeight := int32(100)
+	if canary := rollout.Spec.Strategy.Canary; canary != nil &&
+		canary.TrafficRouting != nil && canary.TrafficRouting.MaxTrafficWeight != nil {
+		maxWeight = *canary.TrafficRouting.MaxTrafficWeight
+	}
+	if maxWeight <= 0 || 1000%maxWeight != 0 {
+		return 0, rpcErrorf("shardkit: maxTrafficWeight %d cannot scale exactly to per mille (want a positive divisor of 1000)",
+			maxWeight)
+	}
+	return maxWeight, pluginTypes.RpcError{}
+}
+
+// SetWeight moves the bound plan to weight w as a new epoch:
+// Active at w*(1000/maxTrafficWeight) per mille for w > 0, Off at
+// 0 for w == 0. An already-matching plan is a no-op, not a new
+// epoch. Only the weight is driven; header/mirror routes and
+// additional destinations fail closed (manage cohorts with the
+// CLI).
 //
 // The zero normalization is the quiescence rule. Argo calls
 // RemoveManagedRoutes on every sync of a fully-promoted rollout
@@ -119,9 +140,13 @@ func (p *Plugin) UpdateHash(rollout *rolloutv1alpha1.Rollout, canaryHash, stable
 // want stable to reclaim everything.
 func (p *Plugin) SetWeight(rollout *rolloutv1alpha1.Rollout, desiredWeight int32,
 	additionalDestinations []rolloutv1alpha1.WeightDestination) pluginTypes.RpcError {
-	if desiredWeight < 0 || desiredWeight > 100 {
-		return rpcErrorf("shardkit: SetWeight: desired weight %d out of range 0-100",
-			desiredWeight)
+	maxWeight, rerr := trafficScale(rollout)
+	if rerr.HasError() {
+		return rerr
+	}
+	if desiredWeight < 0 || desiredWeight > maxWeight {
+		return rpcErrorf("shardkit: SetWeight: desired weight %d out of range 0-%d",
+			desiredWeight, maxWeight)
 	}
 	if len(additionalDestinations) > 0 {
 		return rpcErrorf("shardkit: SetWeight: additional destinations (%d) have no object-routing meaning; manage cohorts with the CLI",
@@ -134,7 +159,7 @@ func (p *Plugin) SetWeight(rollout *rolloutv1alpha1.Rollout, desiredWeight int32
 	if verr := validLive(plan); verr.HasError() {
 		return verr
 	}
-	target := desiredWeight * 10
+	target := desiredWeight * (1000 / maxWeight)
 	wantMode := v1alpha1.ModeActive
 	if desiredWeight == 0 {
 		wantMode = v1alpha1.ModeOff
@@ -176,8 +201,12 @@ func (p *Plugin) VerifyWeight(rollout *rolloutv1alpha1.Rollout, desiredWeight in
 	if verr := validLive(plan); verr.HasError() {
 		return pluginTypes.NotVerified, verr
 	}
+	maxWeight, rerr := trafficScale(rollout)
+	if rerr.HasError() {
+		return pluginTypes.NotVerified, rerr
+	}
 	if plan.Spec.Canary.Mode != v1alpha1.ModeActive ||
-		plan.Spec.Canary.WeightPerMille != desiredWeight*10 {
+		plan.Spec.Canary.WeightPerMille != desiredWeight*(1000/maxWeight) {
 		return pluginTypes.NotVerified, pluginTypes.RpcError{}
 	}
 	if plan.Spec.Tracks.Canary == nil {

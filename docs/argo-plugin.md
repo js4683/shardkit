@@ -54,10 +54,22 @@ deliveries converge.
 
 ## Method bindings
 
-Argo weights are percent (0–100); plan weights are per mille, so
-`SetWeight`/`VerifyWeight` scale by exactly 10 (M2 exit steps
-1→5→25→50→100 map to 10→50→250→500→1000), except `SetWeight(0)`,
-which normalizes to `Off`/0: zero weight means no canary.
+The plugin drives the weight and nothing else: `SetWeight` /
+`VerifyWeight` map rollout steps onto plan epochs, while
+`SetHeaderRoute` / `SetMirrorRoute` and additional destinations
+fail closed with `RpcError` — object routing has no headers,
+mirrors, or per-destination cohorts, and silent success would lie
+to the rollout. Shadow mode and explicit cohorts stay CLI-managed
+(see [CLI](cli.md)).
+
+Argo weights count in units of the rollout's `maxTrafficWeight`
+(default 100, so whole percents); plan weights are per mille, so
+`SetWeight`/`VerifyWeight` scale by exactly `1000/max` (default
+steps 1→5→25→50→100 map to 10→50→250→500→1000, while
+`maxTrafficWeight: 1000` allows 0.1% steps), except `SetWeight(0)`,
+which normalizes to `Off`/0: zero weight means no canary. A
+`maxTrafficWeight` that is not a positive divisor of 1000 fails
+closed — the plan cannot represent it exactly.
 
 Quiescence rule: after promotion Argo calls `RemoveManagedRoutes`
 then `SetWeight(0)` on every sync. Both land on `Off`/0, so a
@@ -78,8 +90,8 @@ name, not `Type()`.
 |---|---|---|
 | `Type()` | returns `"shardkit"` | pure |
 | `InitPlugin()` | list ShardPlans (connectivity + RBAC probe) | error surfaces Argo-side when the API is unreachable. The probe list is cluster-scoped (no namespace at init), so the install needs the read-only `argo-rollouts-shardplans-read` ClusterRole in `config/argo/shardplan-rbac.yaml` — without it every fresh controller pod fails init and no step ever advances (found live 2026-09-27) |
-| `SetWeight(rollout, w, addl)` | epoch+1: `Active` at weight `w*10` for `w > 0`, `Off` at 0 for `w == 0`; rollout ID preserved | no-op when live already matches; nonempty `addl` is an `RpcError` (v1 has no per-destination objects; cohorts stay CLI-managed) |
-| `VerifyWeight(rollout, w, addl)` | compare live spec + canary ack | `Verified` only when spec weight is `w*10` **and** the canary entry acks the live epoch, generation, and revision. Anything stale reports `NotVerified`, never true (M2 exit: stale VerifyWeight false); nonempty `addl` is an `RpcError` (unverifiable destinations must not read as verified); read errors return `RpcError` (fail closed). Operational consequence (seen live 2026-09-27): Argo logs `Desired weight N not yet verified` every sync and never advances while the canary operator runs a stale `REVISION` (S7 voids its acks) — hand-patched rollout templates must be followed by an operator revision sync, which `argo-demo.sh` does per iteration |
+| `SetWeight(rollout, w, addl)` | epoch+1: `Active` at weight `w*(1000/maxTrafficWeight)` for `w > 0`, `Off` at 0 for `w == 0`; rollout ID preserved | no-op when live already matches; nonempty `addl` is an `RpcError` (v1 has no per-destination objects; cohorts stay CLI-managed); out-of-range `w` or an inexact scale is an `RpcError` |
+| `VerifyWeight(rollout, w, addl)` | compare live spec + canary ack | `Verified` only when spec weight is `w*(1000/maxTrafficWeight)` **and** the canary entry acks the live epoch, generation, and revision. Anything stale reports `NotVerified`, never true (M2 exit: stale VerifyWeight false); nonempty `addl` is an `RpcError` (unverifiable destinations must not read as verified); read errors return `RpcError` (fail closed). Operational consequence (seen live 2026-09-27): Argo logs `Desired weight N not yet verified` every sync and never advances while the canary operator runs a stale `REVISION` (S7 voids its acks) — hand-patched rollout templates must be followed by an operator revision sync, which `argo-demo.sh` does per iteration |
 | `UpdateHash(rollout, canary, stable, addl)` | epoch+1 preserving mode/weight, canary revision set to the canary hash (S7 binding) | no-op when the canary hash already matches spec; nonempty `addl` and empty hashes are `RpcError`. The stable hash is validated non-empty but otherwise ignored: the stable track is externally managed (plain Deployment / CLI flow), while `stable` names Argo's own stable ReplicaSet — writing it into `spec.tracks.stable` would void the real stable operator and stall every handoff |
 | `SetHeaderRoute` / `SetMirrorRoute` | none | `RpcError`: object routing has no headers or mirrors; silent success would lie to the rollout |
 | `RemoveManagedRoutes(rollout)` | epoch+1 `Off`, weight 0 (abort) | called on rollout deletion, on abort, and on **every sync of a fully-promoted rollout** (`reconcileTrafficRouting`: the `IsFullyPromoted` branch runs before the bottom `SetWeight(0)`); no-op when already `Off`; stable reclaims everything and the CLI can take over from there (M2 exit: plugin loss recoverable through CLI). An analysis abort reaches this method through Argo's abort branch (observed live: `RemoveManagedRoutes` wrote the abort epoch; the bottom `SetWeight(0)` then no-ops against `Off`/0); deletion is the other caller |
