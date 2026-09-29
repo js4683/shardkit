@@ -1,6 +1,6 @@
 module github.com/js4683/shardkit
 
-go 1.27.1
+go 1.26.1
 
 require (
 	github.com/argoproj/argo-rollouts v1.10.0

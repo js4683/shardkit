@@ -59,8 +59,16 @@ type Gate struct {
 	// fresh versions must pass ValidateTransition against it
 	// (read-time V9), so direct API edits that bypass the writer
 	// contract are refused instead of adopted.
-	lastSpec           v1alpha1.ShardPlanSpec
-	lastOwner          map[string]partition.Owner
+	lastSpec  v1alpha1.ShardPlanSpec
+	lastOwner map[string]partition.Owner
+	// lastPin records the exclude verdict each namespace evaluated
+	// under: the adopted version plus whether its labels matched
+	// the exclude selector then. A mid-version change in the
+	// verdict means a relabel crossed the exclude boundary without
+	// a handshake, and the gate denies until a new version carries
+	// the labels through drain, ack, and barrier (fail closed;
+	// label-only ownership otherwise flips with no fencing).
+	lastPin            map[string]labelPin
 	degraded           string
 	externalHold       func() bool
 	draining           map[string]bool
@@ -87,6 +95,16 @@ type Observation struct {
 	Stale bool
 	// Degraded carries the gate reason while unhealthy, else "".
 	Degraded string
+}
+
+// labelPin is one namespace's pinned exclude verdict: the adopted
+// plan version it was evaluated under plus whether the namespace's
+// labels matched the exclude selector then.
+type labelPin struct {
+	uid      string
+	epoch    int64
+	gen      int64
+	excluded bool
 }
 
 // trackRevision returns the spec revision for a track, or "" when
@@ -146,6 +164,7 @@ func Attach(ctx context.Context, c client.Reader, planKey types.NamespacedName, 
 		lastCanaryRev: trackRevision(plan.Spec, v1alpha1.TrackCanary),
 		lastSpec:      *plan.Spec.DeepCopy(),
 		lastOwner:     map[string]partition.Owner{},
+		lastPin:       map[string]labelPin{},
 		revokeCtx:     revokeCtx,
 		revoke:        revoke,
 	}, nil
@@ -245,6 +264,11 @@ func (g *Gate) Owned(ctx context.Context, namespace string) (obs Observation, er
 		specRev = trackRevision(plan.Spec, g.track)
 	}
 	draining := g.draining[namespace]
+	// evalVer is the version eval came from (retained on stale
+	// reads, fresh after adoption): the pin compares against it,
+	// not the live baselines, so a concurrent adoption between here
+	// and the pin check re-pins instead of misfiring.
+	evalUID, evalEpoch, evalGen := g.lastUID, g.lastEpoch, g.lastGen
 	g.mu.Unlock()
 	if draining {
 		// Draining namespaces read as foreign with the live
@@ -270,7 +294,18 @@ func (g *Gate) Owned(ctx context.Context, namespace string) (obs Observation, er
 	if err != nil {
 		return obs, &ClosedError{Reason: ReasonPlanMalformed, Msg: err.Error()}
 	}
+	excludedNow := partition.Excluded(ns.Labels, eval.ExcludeLabels)
 	g.mu.Lock()
+	if pin, ok := g.lastPin[namespace]; ok &&
+		pin.uid == evalUID && pin.epoch == evalEpoch && pin.gen == evalGen &&
+		pin.excluded != excludedNow {
+		g.degraded = ReasonLabelsDrifted
+		derr := &ClosedError{Reason: ReasonLabelsDrifted,
+			Msg: fmt.Sprintf("namespace %q relabeled across the exclude boundary at epoch %d; denied until a new version carries the labels through the handshake", namespace, evalEpoch)}
+		g.mu.Unlock()
+		return obs, derr
+	}
+	g.lastPin[namespace] = labelPin{uid: evalUID, epoch: evalEpoch, gen: evalGen, excluded: excludedNow}
 	g.lastOwner[namespace] = owner
 	g.degraded = ""
 	g.mu.Unlock()
@@ -439,6 +474,7 @@ func (g *Gate) resetBaselines(uid string, epoch, gen int64, spec partition.Spec,
 	g.lastCanaryRev = trackRevision(src, v1alpha1.TrackCanary)
 	g.lastSpec = *src.DeepCopy()
 	g.lastOwner = map[string]partition.Owner{}
+	g.lastPin = map[string]labelPin{}
 	g.degraded = ""
 }
 

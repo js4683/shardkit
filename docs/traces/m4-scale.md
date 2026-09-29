@@ -74,3 +74,22 @@ calls onto one blocked read: **2 plan GETs total** (attach + one
 shared storm read), and 5 sequential calls still pay 5 reads —
 sharing never caches. Steady-state `Gate.Owned` still measures per
 call above; storms now cost one plan GET, not one per reconcile.
+
+## Addendum 2026-09-29 — real-server gate bench (review item 1)
+
+The review correctly noted the 11.5 µs figure came from a fake
+client. Measured against envtest 1.37.0 on the same machine
+(`test/envtest/gate_bench_test.go`, `-benchtime=20x`):
+
+| Operation | Result |
+|---|---|
+| `Gate.Owned` serial (2 live GETs + validate + adopt) | **1.41 ms/op** |
+| 100-call storm, 50 workers (MCR>1 shape) | **2.60 ms/op at 2.0 plan-gets/op** |
+
+So the fake client understated the per-call cost ~120× (1.41 ms vs
+11.5 µs — two API round trips dominate), while the storm confirms
+the dedup on a real server: 100 racing reconciles share ~2 plan
+reads instead of 100. Per-reconcile gate overhead is one small
+serial cost (two GETs, no storm amplification); no caching layer —
+the rejected design — is what keeps every call converging at the
+flip (D9).
