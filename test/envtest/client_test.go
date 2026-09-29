@@ -3,6 +3,7 @@ package envtest_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -398,5 +399,96 @@ func TestConfirmDelete_ConcurrentChargers(t *testing.T) {
 				t.Fatalf("canary budget = %+v, want {1 3}", e.Budget)
 			}
 		}
+	}
+}
+
+// TestRelabel_MidEpochDenies_RealServer pins the relabel pin against
+// the real API server: relabeling a namespace across the exclude
+// boundary mid-epoch denies writes on both tracks (fail closed — no
+// unfenced flip, no overlap) until the next version carries the new
+// labels through the handshake, which reopens stable and fences
+// canary out with NotOwned.
+func TestRelabel_MidEpochDenies_RealServer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	ns := corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "team-c"}}
+	if err := k8sClient.Create(ctx, &ns); err != nil {
+		t.Fatal(err)
+	}
+	plan := basePlan("relabel")
+	plan.Spec.Epoch = 1
+	plan.Spec.Canary.Mode = v1alpha1.ModeActive
+	plan.Spec.Canary.WeightPerMille = 1000
+	plan.Spec.Canary.Exclude.Selector = &metav1.LabelSelector{
+		MatchLabels: map[string]string{"tier": "critical"},
+	}
+	requireCreate(t, plan)
+	key := types.NamespacedName{Namespace: testNS, Name: "relabel"}
+	stableGate, err := shardkit.Attach(ctx, k8sClient, key, "stable", "rev-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	canaryGate, err := shardkit.Attach(ctx, k8sClient, key, "canary", "rev-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stable, canary := stableGate.Client(k8sClient, k8sClient), canaryGate.Client(k8sClient, k8sClient)
+
+	mk := func(name string) *corev1.ConfigMap {
+		return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "team-c", Name: name}}
+	}
+	// Pre-relabel routing: canary owns unlabeled team-c at full
+	// weight; both gates pin excluded=false.
+	if err := canary.Create(ctx, mk("c1")); err != nil {
+		t.Fatalf("canary create owned: %v", err)
+	}
+	if err := stable.Create(ctx, mk("s0")); err == nil {
+		t.Fatal("stable create foreign: nil error, want NotOwned")
+	} else if denied, ok := shardkit.AsDenied(err); !ok || denied.Reason != shardkit.ReasonNotOwned {
+		t.Fatalf("stable create foreign: %v, want NotOwned", err)
+	}
+	// Relabel across the boundary mid-epoch: both tracks deny with
+	// GateClosed naming LabelsDrifted — no flip, no overlap.
+	var liveNS corev1.Namespace
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "team-c"}, &liveNS); err != nil {
+		t.Fatal(err)
+	}
+	liveNS.Labels = map[string]string{"tier": "critical"}
+	if err := k8sClient.Update(ctx, &liveNS); err != nil {
+		t.Fatal(err)
+	}
+	for name, gc := range map[string]*shardkit.GuardedClient{"canary": canary, "stable": stable} {
+		err := gc.Create(ctx, mk(name+"-drifted"))
+		denied, ok := shardkit.AsDenied(err)
+		if !ok || denied.Reason != shardkit.ReasonGateClosed {
+			t.Fatalf("%s create after relabel: err = %v, want denied GateClosed", name, err)
+		}
+		if !strings.Contains(denied.Msg, shardkit.ReasonLabelsDrifted) {
+			t.Fatalf("%s create after relabel: msg %q lacks LabelsDrifted", name, denied.Msg)
+		}
+	}
+	if canaryGate.Degraded() != shardkit.ReasonLabelsDrifted {
+		t.Fatalf("degraded = %q, want LabelsDrifted", canaryGate.Degraded())
+	}
+	// The next version re-pins through the handshake: stable owns
+	// excluded team-c, canary is fenced out with NotOwned.
+	var live v1alpha1.ShardPlan
+	if err := k8sClient.Get(ctx, key, &live); err != nil {
+		t.Fatal(err)
+	}
+	live.Spec.Epoch = 2
+	if err := k8sClient.Update(ctx, &live); err != nil {
+		t.Fatal(err)
+	}
+	if err := stable.Create(ctx, mk("s1")); err != nil {
+		t.Fatalf("stable create excluded after bump: %v", err)
+	}
+	if err := canary.Create(ctx, mk("c2")); err == nil {
+		t.Fatal("canary create excluded after bump: nil error, want NotOwned")
+	} else if denied, ok := shardkit.AsDenied(err); !ok || denied.Reason != shardkit.ReasonNotOwned {
+		t.Fatalf("canary create excluded after bump: %v, want NotOwned", err)
+	}
+	if canaryGate.Degraded() != "" {
+		t.Fatalf("degraded = %q, want healthy", canaryGate.Degraded())
 	}
 }

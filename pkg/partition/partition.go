@@ -166,7 +166,7 @@ func (s Spec) Explain(namespace string, labels map[string]string) (Explanation, 
 		exp.Owner, exp.Rule = Stable, "mode"
 		return exp, nil
 	}
-	if excluded(labels, s.ExcludeLabels) {
+	if Excluded(labels, s.ExcludeLabels) {
 		exp.Owner, exp.Rule = Stable, "exclude"
 		return exp, nil
 	}
@@ -185,7 +185,11 @@ func (s Spec) Explain(namespace string, labels map[string]string) (Explanation, 
 
 // excluded applies matchLabels semantics: an empty selector excludes
 // nothing, and every pair must be present with an equal value.
-func excluded(labels, selector map[string]string) bool {
+// Excluded reports matchLabels semantics for the exclude selector:
+// an empty selector excludes nothing; otherwise every pair must be
+// present. Exported so the gate's relabel pin uses the exact
+// predicate ownership evaluates.
+func Excluded(labels, selector map[string]string) bool {
 	if len(selector) == 0 {
 		return false
 	}

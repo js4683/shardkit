@@ -689,6 +689,82 @@ func TestGate_CanceledContext(t *testing.T) {
 	}
 }
 
+// TestOwned_RelabelDriftDenies pins the relabel pin: a namespace
+// relabeled across the exclude boundary mid-version denies on both
+// tracks (no overlap, no unfenced flip) until a new version carries
+// the labels through the handshake. Label churn that does not cross
+// the boundary is unaffected.
+func TestOwned_RelabelDriftDenies(t *testing.T) {
+	ctx := context.Background()
+	excludes := func(p *v1alpha1.ShardPlan) {
+		p.Spec.Canary.Exclude.Selector = &metav1.LabelSelector{
+			MatchLabels: map[string]string{"tier": "critical"},
+		}
+	}
+	c := fixture(t, excludes)
+	canary, err := Attach(ctx, c, planKey, "canary", "rev-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stable, err := Attach(ctx, c, planKey, "stable", "rev-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	flipActive(t, c)
+	if obs, _ := canary.Owned(ctx, "demo-87"); !obs.Owned {
+		t.Fatal("setup: canary should own unlabeled demo-87")
+	}
+	if obs, _ := stable.Owned(ctx, "demo-87"); obs.Owned {
+		t.Fatal("setup: stable should not own demo-87")
+	}
+	// Unrelated label churn does not cross the boundary: no denial.
+	var ns corev1.Namespace
+	if err := c.Get(ctx, types.NamespacedName{Name: "demo-87"}, &ns); err != nil {
+		t.Fatal(err)
+	}
+	ns.Labels = map[string]string{"team": "a"}
+	if err := c.Update(ctx, &ns); err != nil {
+		t.Fatal(err)
+	}
+	if obs, err := canary.Owned(ctx, "demo-87"); err != nil || !obs.Owned {
+		t.Fatalf("churned obs = %+v err = %v, want owned", obs, err)
+	}
+	// Across the boundary: both tracks deny (fail closed, no flip).
+	ns.Labels["tier"] = "critical"
+	if err := c.Update(ctx, &ns); err != nil {
+		t.Fatal(err)
+	}
+	for name, g := range map[string]*Gate{"canary": canary, "stable": stable} {
+		if _, err := g.Owned(ctx, "demo-87"); err == nil {
+			t.Fatalf("%s: relabeled Owned: nil error, want LabelsDrifted", name)
+		} else if closed, ok := AsClosed(err); !ok || closed.Reason != ReasonLabelsDrifted {
+			t.Fatalf("%s: relabeled err = %v, want closed LabelsDrifted", name, err)
+		}
+	}
+	if canary.Degraded() != ReasonLabelsDrifted {
+		t.Fatalf("degraded = %q, want LabelsDrifted", canary.Degraded())
+	}
+	// The next version re-pins and reopens through the handshake:
+	// excluded demo-87 belongs to stable.
+	var live v1alpha1.ShardPlan
+	if err := c.Get(ctx, planKey, &live); err != nil {
+		t.Fatal(err)
+	}
+	live.Spec.Epoch = 3
+	if err := c.Update(ctx, &live); err != nil {
+		t.Fatal(err)
+	}
+	if obs, err := canary.Owned(ctx, "demo-87"); err != nil || obs.Owned || obs.Epoch != 3 {
+		t.Fatalf("adopted canary obs = %+v err = %v, want foreign epoch 3", obs, err)
+	}
+	if obs, err := stable.Owned(ctx, "demo-87"); err != nil || !obs.Owned {
+		t.Fatalf("adopted stable obs = %+v err = %v, want owned", obs, err)
+	}
+	if canary.Degraded() != "" {
+		t.Fatalf("degraded = %q, want healthy", canary.Degraded())
+	}
+}
+
 // TestDraining pins the drain seam: draining namespaces and singleton
 // duty read as foreign without error, while the rest is unaffected.
 func TestDraining(t *testing.T) {

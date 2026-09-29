@@ -97,7 +97,7 @@ func basePlan(name string) *v1alpha1.ShardPlan {
 }
 
 // requireCreate creates the plan or fails the test.
-func requireCreate(t *testing.T, p *v1alpha1.ShardPlan) {
+func requireCreate(t testing.TB, p *v1alpha1.ShardPlan) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

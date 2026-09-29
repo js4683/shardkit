@@ -58,6 +58,10 @@ selector evaluated against current namespace labels. If namespace
 labels cannot be read (missing from cache), the gate retains the last
 evaluated owner for that namespace and reports a degraded condition;
 it never silently flips ownership on a transient read error.
+Relabels across the exclude boundary mid-version deny with
+`LabelsDrifted` on both tracks until a new version carries the new
+labels through the handshake (the relabel pin, D10); label churn
+that does not cross the boundary is unaffected.
 Cluster-scoped and cross-namespace effects follow the singleton
 policy (I4), not this function.
 

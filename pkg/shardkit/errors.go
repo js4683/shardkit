@@ -52,6 +52,11 @@ const (
 	// ReasonLabelsUnreadable: namespace labels unreadable; the gate
 	// retains the last evaluated owner and reports degraded.
 	ReasonLabelsUnreadable = "LabelsUnreadable"
+	// ReasonLabelsDrifted: namespace labels crossed the exclude
+	// boundary mid-version (a relabel without a handshake). The gate
+	// denies until a new version carries the labels through drain,
+	// ack, and barrier; see the label pin in gate.go.
+	ReasonLabelsDrifted = "LabelsDrifted"
 	// ReasonExternalHold: a configured external hold (legacy-lease
 	// migration mutex, maintenance lock) is not satisfied; the
 	// track must not act even where the plan grants ownership.
