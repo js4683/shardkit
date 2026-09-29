@@ -13,15 +13,20 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"golang.org/x/sync/singleflight"
+
 	v1alpha1 "github.com/js4683/shardkit/api/v1alpha1"
 	"github.com/js4683/shardkit/pkg/partition"
 )
 
 // Gate is the M1 ownership gate. It observes one ShardPlan, validates
 // every version it acts on (spec V1-V10), and evaluates the pure
-// partition function per namespace. Observations serialize on an
-// internal mutex; reconcile throughput here is plan reads, not object
-// writes, so a single mutex is plenty (M4 may shard it).
+// partition function per namespace. Every call reads the live plan:
+// the loser's prompt convergence at a flip is the cooperative
+// guarantee (I1), so reads are never cached — but callers racing on
+// the same read share one in-flight GET each (singleflight), so an
+// acquire storm pays one plan read, not one per reconcile. The mutex
+// guards the adoption baselines only, never network I/O.
 //
 // Fail-closed rules (spec B1-B4): missing, deleted, recreated, or
 // malformed plans close the gate; stale reads reuse the last good
@@ -32,6 +37,12 @@ type Gate struct {
 	planKey  types.NamespacedName
 	track    string
 	revision string // reported identity for status acks (leases/item 4)
+
+	// flight dedups concurrent live reads: racers share one API GET
+	// and each evaluate a private copy of the live bytes. Sharing is
+	// in-flight only — nothing is retained after the call — so every
+	// observation still converges at the flip (I1).
+	flight singleflight.Group
 
 	mu            sync.Mutex
 	lastUID       string
@@ -153,39 +164,53 @@ func (g *Gate) SetMetrics(m *Metrics) {
 }
 
 func (g *Gate) Owned(ctx context.Context, namespace string) (obs Observation, err error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	// API reads run outside the mutex (flighted, one shared GET per
+	// race); the mutex guards the adoption baselines only. Every
+	// call still evaluates live bytes — sharing never caches.
+	var metrics *Metrics
 	defer func() {
 		decision, reason := gateOutcome(obs.Owned, err)
-		g.metrics.ObserveGateDecision(g.track, g.revision, "namespace", decision, reason)
+		metrics.ObserveGateDecision(g.track, g.revision, "namespace", decision, reason)
 	}()
 
+	g.mu.Lock()
+	metrics = g.metrics
 	if g.externalHold != nil && !g.externalHold() {
 		g.degraded = ReasonExternalHold
+		g.mu.Unlock()
 		return obs, &ClosedError{Reason: ReasonExternalHold,
 			Msg: "external hold unsatisfied (legacy migration mutex or maintenance lock)"}
 	}
-	var plan v1alpha1.ShardPlan
-	if err := g.client.Get(ctx, g.planKey, &plan); err != nil {
+	g.mu.Unlock()
+
+	plan, err := g.getPlan(ctx)
+	if err != nil {
 		if errors.IsNotFound(err) {
+			g.mu.Lock()
 			g.degraded = ReasonPlanDeleted
+			g.mu.Unlock()
 			return obs, &ClosedError{Reason: ReasonPlanDeleted,
 				Msg: fmt.Sprintf("plan %s deleted after attach (B2)", g.planKey)}
 		}
 		return obs, &ClosedError{Reason: ReasonPlanUnreadable,
 			Msg: fmt.Sprintf("plan %s unreadable: %v", g.planKey, err)}
 	}
-	if err := plan.ValidateCreate(); err != nil {
+	if verr := plan.ValidateCreate(); verr != nil {
+		g.mu.Lock()
 		g.degraded = ReasonPlanMalformed
+		g.mu.Unlock()
 		return obs, &ClosedError{Reason: ReasonPlanMalformed,
-			Msg: fmt.Sprintf("plan %s malformed, gate holds last state (B4): %v", g.planKey, err)}
+			Msg: fmt.Sprintf("plan %s malformed, gate holds last state (B4): %v", g.planKey, verr)}
 	}
 	spec, err := PartitionSpec(&plan)
 	if err != nil {
+		g.mu.Lock()
 		g.degraded = ReasonPlanMalformed
+		g.mu.Unlock()
 		return obs, &ClosedError{Reason: ReasonPlanMalformed, Msg: err.Error()}
 	}
 
+	g.mu.Lock()
 	eval := g.lastGood
 	epoch, mode, weight := g.lastEpoch, g.lastMode, g.lastWeight
 	specRev := g.retainedRevision()
@@ -194,8 +219,10 @@ func (g *Gate) Owned(ctx context.Context, namespace string) (obs Observation, er
 	} else if string(plan.UID) != g.lastUID {
 		if plan.Spec.Canary.Mode != v1alpha1.ModeOff {
 			g.degraded = ReasonPlanRecreated
-			return obs, &ClosedError{Reason: ReasonPlanRecreated,
+			derr := &ClosedError{Reason: ReasonPlanRecreated,
 				Msg: fmt.Sprintf("plan %s recreated outside Off; drive it through Off (B3)", g.planKey)}
+			g.mu.Unlock()
+			return obs, derr
 		}
 		g.resetBaselines(string(plan.UID), plan.Spec.Epoch, plan.Generation, spec, plan.Spec)
 		eval, epoch, mode, weight = spec, plan.Spec.Epoch, plan.Spec.Canary.Mode,
@@ -205,25 +232,31 @@ func (g *Gate) Owned(ctx context.Context, namespace string) (obs Observation, er
 		// Fresh same-UID version: enforce the writer contract
 		// before adopting (read-time V9). Refusals hold every
 		// baseline, so a tampered version changes nothing.
-		if err := v1alpha1.ValidateTransition(&g.lastSpec, &plan.Spec); err != nil {
+		if verr := v1alpha1.ValidateTransition(&g.lastSpec, &plan.Spec); verr != nil {
 			g.degraded = ReasonPlanMalformed
-			return obs, &ClosedError{Reason: ReasonPlanMalformed,
-				Msg: fmt.Sprintf("plan %s violates writer contract, gate holds last state: %v", g.planKey, err)}
+			derr := &ClosedError{Reason: ReasonPlanMalformed,
+				Msg: fmt.Sprintf("plan %s violates writer contract, gate holds last state: %v", g.planKey, verr)}
+			g.mu.Unlock()
+			return obs, derr
 		}
 		g.adoptLocked(&plan, spec)
 		eval, epoch, mode, weight = spec, plan.Spec.Epoch, plan.Spec.Canary.Mode,
 			plan.Spec.Canary.WeightPerMille
 		specRev = trackRevision(plan.Spec, g.track)
 	}
-	if g.draining[namespace] {
+	draining := g.draining[namespace]
+	g.mu.Unlock()
+	if draining {
 		// Draining namespaces read as foreign with the live
 		// version attached: no error, just no authorization.
 		return Observation{Owned: false, Epoch: epoch,
 			Mode: mode, Weight: weight, SpecRevision: specRev}, nil
 	}
 
-	var ns corev1.Namespace
-	if err := g.client.Get(ctx, types.NamespacedName{Name: namespace}, &ns); err != nil {
+	ns, err := g.getNamespace(ctx, namespace)
+	if err != nil {
+		g.mu.Lock()
+		defer g.mu.Unlock()
 		if last, ok := g.lastOwner[namespace]; ok {
 			g.degraded = ReasonLabelsUnreadable
 			return Observation{Owned: last == g.want(), Epoch: epoch,
@@ -237,8 +270,10 @@ func (g *Gate) Owned(ctx context.Context, namespace string) (obs Observation, er
 	if err != nil {
 		return obs, &ClosedError{Reason: ReasonPlanMalformed, Msg: err.Error()}
 	}
+	g.mu.Lock()
 	g.lastOwner[namespace] = owner
 	g.degraded = ""
+	g.mu.Unlock()
 	return Observation{Owned: owner == g.want(), Epoch: epoch,
 		Mode: mode, Weight: weight, SpecRevision: specRev, Stale: obs.Stale}, nil
 }
@@ -266,23 +301,30 @@ func (g *Gate) SingletonOwned(ctx context.Context) (owned bool, err error) {
 // evaluated version, so the guarded client can fence
 // cross-revision writes (S7).
 func (g *Gate) singletonOwned(ctx context.Context) (owned bool, specRev string, err error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	// Like Owned: the live plan read runs outside the mutex
+	// (flighted); adoption runs under it.
+	var metrics *Metrics
 	defer func() {
 		decision, reason := gateOutcome(owned, err)
-		g.metrics.ObserveGateDecision(g.track, g.revision, "singleton", decision, reason)
+		metrics.ObserveGateDecision(g.track, g.revision, "singleton", decision, reason)
 	}()
 
+	g.mu.Lock()
+	metrics = g.metrics
 	if g.externalHold != nil && !g.externalHold() {
 		g.degraded = ReasonExternalHold
+		g.mu.Unlock()
 		return false, "", &ClosedError{Reason: ReasonExternalHold,
 			Msg: "external hold unsatisfied (legacy migration mutex or maintenance lock)"}
 	}
 	if g.drainingSingleton {
+		g.mu.Unlock()
 		return false, "", nil
 	}
-	var plan v1alpha1.ShardPlan
-	if err := g.client.Get(ctx, g.planKey, &plan); err != nil {
+	g.mu.Unlock()
+
+	plan, err := g.getPlan(ctx)
+	if err != nil {
 		if errors.IsNotFound(err) {
 			return false, "", &ClosedError{Reason: ReasonPlanDeleted,
 				Msg: fmt.Sprintf("plan %s deleted after attach (B2)", g.planKey)}
@@ -290,14 +332,16 @@ func (g *Gate) singletonOwned(ctx context.Context) (owned bool, specRev string, 
 		return false, "", &ClosedError{Reason: ReasonPlanUnreadable,
 			Msg: fmt.Sprintf("plan %s unreadable: %v", g.planKey, err)}
 	}
-	if err := plan.ValidateCreate(); err != nil {
+	if verr := plan.ValidateCreate(); verr != nil {
 		return false, "", &ClosedError{Reason: ReasonPlanMalformed,
-			Msg: fmt.Sprintf("plan %s malformed (B4): %v", g.planKey, err)}
+			Msg: fmt.Sprintf("plan %s malformed (B4): %v", g.planKey, verr)}
 	}
 	spec, err := PartitionSpec(&plan)
 	if err != nil {
 		return false, "", &ClosedError{Reason: ReasonPlanMalformed, Msg: err.Error()}
 	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	if plan.StaleFor(g.lastUID, g.lastEpoch, g.lastGen) {
 		return g.lastSingleton == g.track, g.retainedRevision(), nil
 	}
@@ -314,13 +358,56 @@ func (g *Gate) singletonOwned(ctx context.Context) (owned bool, specRev string, 
 	// adoption, mirroring Owned, so singleton duty never follows a
 	// version the namespace path refuses, and the two paths never
 	// disagree about what is stale.
-	if err := v1alpha1.ValidateTransition(&g.lastSpec, &plan.Spec); err != nil {
+	if verr := v1alpha1.ValidateTransition(&g.lastSpec, &plan.Spec); verr != nil {
 		g.degraded = ReasonPlanMalformed
 		return false, "", &ClosedError{Reason: ReasonPlanMalformed,
-			Msg: fmt.Sprintf("plan %s violates writer contract, gate holds last state: %v", g.planKey, err)}
+			Msg: fmt.Sprintf("plan %s violates writer contract, gate holds last state: %v", g.planKey, verr)}
 	}
 	g.adoptLocked(&plan, spec)
 	return plan.Spec.SingletonOwner == g.track, trackRevision(plan.Spec, g.track), nil
+}
+
+// getPlan returns a private copy of the live plan. Callers racing on
+// the read share one in-flight API GET and each evaluate their own
+// copy; sharing ends when the call does, so nothing is cached and
+// loser convergence at a flip is unchanged (I1). A shared failure
+// fails every waiter closed, the safe direction, and a waiter whose
+// own context expired fails even when the shared read succeeded.
+func (g *Gate) getPlan(ctx context.Context) (v1alpha1.ShardPlan, error) {
+	v, err, _ := g.flight.Do("plan", func() (any, error) {
+		var plan v1alpha1.ShardPlan
+		if err := g.client.Get(ctx, g.planKey, &plan); err != nil {
+			return nil, err
+		}
+		return &plan, nil
+	})
+	if err != nil {
+		return v1alpha1.ShardPlan{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return v1alpha1.ShardPlan{}, err
+	}
+	return *v.(*v1alpha1.ShardPlan).DeepCopy(), nil
+}
+
+// getNamespace returns a private copy of one live namespace, sharing
+// one in-flight GET across callers racing on the same name. The same
+// no-caching contract as getPlan: every call observes the flip.
+func (g *Gate) getNamespace(ctx context.Context, namespace string) (corev1.Namespace, error) {
+	v, err, _ := g.flight.Do("ns/"+namespace, func() (any, error) {
+		var ns corev1.Namespace
+		if err := g.client.Get(ctx, types.NamespacedName{Name: namespace}, &ns); err != nil {
+			return nil, err
+		}
+		return &ns, nil
+	})
+	if err != nil {
+		return corev1.Namespace{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return corev1.Namespace{}, err
+	}
+	return *v.(*corev1.Namespace).DeepCopy(), nil
 }
 
 // adoptLocked records a fresh same-UID version as the new baseline

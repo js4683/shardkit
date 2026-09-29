@@ -51,3 +51,26 @@ fleet back to rest (21 widgets).
   budgets cap the blast radius instead of speeding it up.
 - `make check` (22 files) and full gates re-run green after the
   `testing.TB` helper widening (see `docs/plans/verification.md`).
+
+## Addendum 2026-09-29 — gate reads stay live (D9)
+
+External review asked for cached gate reads plus frozen labels. We
+built it on a branch (observer-published versions, per-version frozen
+verdicts) and the randomized two-manager audit failed
+deterministically: seed `1790654963648388000`, step 15, `aud-02`
+owned by both tracks (live 3/3, stable adopted 2/2, canary adopted
+3/3). The same seed passes on live reads. Root cause is structural,
+not a bug: live reads are the loser's self-fence — both tracks
+converge at the flip. Any async adoption delays loser convergence,
+and strict I1 plus cached reads plus loser-down availability cannot
+all hold (only the loser's release proves de-authorization, which
+needs the loser alive; frozen labels diverge the same way across a
+relabel). This matches the standing FA1.2 constraint: admission must
+read ownership authoritatively, not cached.
+
+Adopted instead: in-flight dedup (singleflight) over unchanged live
+reads. `TestGate_StormSharesReads` piles 100 concurrent `Owned`
+calls onto one blocked read: **2 plan GETs total** (attach + one
+shared storm read), and 5 sequential calls still pay 5 reads —
+sharing never caches. Steady-state `Gate.Owned` still measures per
+call above; storms now cost one plan GET, not one per reconcile.
