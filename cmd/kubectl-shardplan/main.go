@@ -1,5 +1,6 @@
 // Command kubectl-shardplan is the manual CLI for ShardPlans: status,
-// explain, simulate, set-weight, and abort. It works without Argo,
+// explain, simulate, set-weight, bump-epoch, and abort. It works
+// without Argo,
 // so a plugin-API change degrades to manual steps rather than an
 // outage. Installed on PATH as kubectl-shardplan, it runs as
 // `kubectl shardplan`.
@@ -47,6 +48,7 @@ Commands:
   explain PLAN NAMESPACE          why NAMESPACE is owned by its track
   simulate PLAN [flags]           ownership distribution without cluster writes
   set-weight PLAN N [flags]       new canary weight (optimistic concurrency)
+  bump-epoch PLAN [flags]         new epoch, identical spec (relabel recovery)
   abort PLAN [flags]              return everything to stable (mode Off, weight 0)
 
 Globals (before or after the command):
@@ -74,7 +76,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "-v", "-V", "--version", "version":
 		fmt.Fprintln(stdout, "kubectl-shardplan "+version)
 		return 0
-	case "status", "explain", "simulate", "set-weight", "abort":
+	case "status", "explain", "simulate", "set-weight", "bump-epoch", "abort":
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n%s", cmd, usageText)
 		return 2
@@ -113,6 +115,8 @@ func parseArgs(cmd string, args []string, stdout, stderr io.Writer) (execFunc, b
 		return parseSimulate(args, stdout, stderr)
 	case "set-weight":
 		return parseSetWeight(args, stdout, stderr)
+	case "bump-epoch":
+		return parseBumpEpoch(args, stdout, stderr)
 	case "abort":
 		return parseAbort(args, stdout, stderr)
 	default:

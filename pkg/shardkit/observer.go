@@ -270,11 +270,11 @@ func (o *Observer) resume(ctx context.Context, plan *v1alpha1.ShardPlan, spec pa
 		o.metrics.ObserveTransition(o.track, o.gate.Revision(), "advance_refused")
 		return nil
 	}
-	grant, single, err := o.evaluate(ctx, plan, spec)
+	grant, single, listed, err := o.evaluate(ctx, plan, spec)
 	if err != nil {
 		return err
 	}
-	o.setBaselines(string(plan.UID), plan.Spec.Epoch, plan.Generation, grant, single)
+	o.setBaselines(string(plan.UID), plan.Spec.Epoch, plan.Generation, grant, single, listed)
 	relinquished, err := o.complement(ctx, grant)
 	if err != nil {
 		return err
@@ -302,11 +302,11 @@ func (o *Observer) adopt(ctx context.Context, plan *v1alpha1.ShardPlan, spec par
 		o.metrics.ObserveTransition(o.track, o.gate.Revision(), "advance_refused")
 		return nil
 	}
-	grant, single, err := o.evaluate(ctx, plan, spec)
+	grant, single, listed, err := o.evaluate(ctx, plan, spec)
 	if err != nil {
 		return err
 	}
-	o.setBaselines(string(plan.UID), plan.Spec.Epoch, plan.Generation, grant, single)
+	o.setBaselines(string(plan.UID), plan.Spec.Epoch, plan.Generation, grant, single, listed)
 	o.gate.SetDraining(nil)
 	o.gate.SetDrainingSingleton(false)
 	evidence, err := o.snapshotEvidence(ctx)
@@ -361,7 +361,7 @@ func (o *Observer) transition(ctx context.Context, plan *v1alpha1.ShardPlan, spe
 		return nil
 	}
 	ver := VersionOf(plan)
-	grant, single, err := o.evaluate(ctx, plan, spec)
+	grant, single, listed, err := o.evaluate(ctx, plan, spec)
 	if err != nil {
 		return err
 	}
@@ -424,7 +424,7 @@ func (o *Observer) transition(ctx context.Context, plan *v1alpha1.ShardPlan, spe
 			return nil
 		}
 	}
-	o.setBaselines(ver.UID, ver.Epoch, ver.Generation, grant, single)
+	o.setBaselines(ver.UID, ver.Epoch, ver.Generation, grant, single, listed)
 	o.gate.SetDraining(nil)
 	o.gate.SetDrainingSingleton(false)
 	// Membership-steady versions (and post-acquire) republish steady
@@ -541,29 +541,34 @@ func (o *Observer) acquire(ctx context.Context, ver PlanVersion, gained []string
 }
 
 // evaluate computes this track's grant under spec: namespaces owned
-// plus singleton duty. Namespace objects come from direct reads:
-// transition deltas must not rest on cache staleness.
-func (o *Observer) evaluate(ctx context.Context, plan *v1alpha1.ShardPlan, spec partition.Spec) (map[string]bool, bool, error) {
+// plus singleton duty, plus every namespace name the listing
+// observed (the gate tells relabeled namespaces, listed but
+// unheld, from genuinely new ones, absent from the listing).
+// Namespace objects come from direct reads: transition deltas must
+// not rest on cache staleness.
+func (o *Observer) evaluate(ctx context.Context, plan *v1alpha1.ShardPlan, spec partition.Spec) (map[string]bool, bool, []string, error) {
 	var list corev1.NamespaceList
 	if err := o.apiReader.List(ctx, &list); err != nil {
-		return nil, false, fmt.Errorf("namespace list: %w", err)
+		return nil, false, nil, fmt.Errorf("namespace list: %w", err)
 	}
 	want := partition.Stable
 	if o.track == v1alpha1.TrackCanary {
 		want = partition.Canary
 	}
 	grant := map[string]bool{}
+	listed := make([]string, 0, len(list.Items))
 	for i := range list.Items {
 		ns := &list.Items[i]
+		listed = append(listed, ns.Name)
 		owner, err := spec.Owner(ns.Name, ns.Labels)
 		if err != nil {
-			return nil, false, fmt.Errorf("ownership of %q: %w", ns.Name, err)
+			return nil, false, nil, fmt.Errorf("ownership of %q: %w", ns.Name, err)
 		}
 		if owner == want {
 			grant[ns.Name] = true
 		}
 	}
-	return grant, plan.Spec.SingletonOwner == o.track, nil
+	return grant, plan.Spec.SingletonOwner == o.track, listed, nil
 }
 
 // complement lists live namespaces outside the grant (drain set for
@@ -583,7 +588,11 @@ func (o *Observer) complement(ctx context.Context, grant map[string]bool) (map[s
 }
 
 // setBaselines adopts one version's ownership as the new baseline.
-func (o *Observer) setBaselines(uid string, epoch, gen int64, grant map[string]bool, single bool) {
+// listed carries every namespace name the listing behind grant
+// observed. The grant plus the listing are published to the gate
+// for first-sighting checks (a listed-but-unheld namespace moved
+// without a handshake); the gate copies both collections.
+func (o *Observer) setBaselines(uid string, epoch, gen int64, grant map[string]bool, single bool, listed []string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.hasBase = true
@@ -593,6 +602,7 @@ func (o *Observer) setBaselines(uid string, epoch, gen int64, grant map[string]b
 	o.held = grant
 	o.heldSing = single
 	o.metrics.SetHeld(o.track, o.gate.Revision(), len(grant), single)
+	o.gate.SetHandshakeState(uid, epoch, gen, grant, listed)
 }
 
 func copyHeld(in map[string]bool) map[string]bool {

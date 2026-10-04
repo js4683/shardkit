@@ -120,12 +120,16 @@ func modeOrLive(mode string, plan *v1alpha1.ShardPlan) string {
 
 // specMutation describes one spec transition. Zero epoch with
 // epochAuto assigns live+1; explicit epochs must exceed live.
+// keepSpec writes live+epoch only (bump-epoch): it skips the no-op
+// check and never clobbers a concurrently written spec, because the
+// write derives from the freshly read live object.
 type specMutation struct {
 	weight    int32
 	mode      string
 	epoch     int64
 	epochAuto bool
 	rollout   string
+	keepSpec  bool
 }
 
 // applySpecUpdate runs one optimistic-concurrency spec update: read,
@@ -170,13 +174,19 @@ func applySpecUpdate(ctx context.Context, c client.Client, key types.NamespacedN
 			return nil, nil, false
 		}
 		if mode == live.Spec.Canary.Mode && m.weight == live.Spec.Canary.WeightPerMille && rollout == live.Spec.Rollout {
-			return nil, &live, true // desired state already holds
+			if !m.keepSpec {
+				return nil, &live, true // desired state already holds
+			}
 		}
 		next := live.DeepCopy()
-		next.Spec.Canary.Mode = mode
-		next.Spec.Canary.WeightPerMille = m.weight
-		next.Spec.Epoch = epoch
-		next.Spec.Rollout = rollout
+		if m.keepSpec {
+			next.Spec.Epoch = epoch // lone bump: spec untouched
+		} else {
+			next.Spec.Canary.Mode = mode
+			next.Spec.Canary.WeightPerMille = m.weight
+			next.Spec.Epoch = epoch
+			next.Spec.Rollout = rollout
+		}
 		if err := next.ValidateUpdate(&live); err != nil {
 			fmt.Fprintf(stderr, "error: update rejected: %v; fix and re-run\n", err)
 			return nil, nil, false
