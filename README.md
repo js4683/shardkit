@@ -23,7 +23,7 @@ stale or tampered plan stops all writes instead of causing a split brain.
 - **Acked handoffs** — tracks drain, release, and acquire behind each
   other's acknowledgements plus a freshness barrier over write versions.
 - **Operator tooling** — `kubectl-shardplan` CLI (`status`, `explain`,
-  `simulate`, `set-weight`, `abort`), an Argo Rollouts traffic-router
+  `simulate`, `set-weight`, `bump-epoch`, `abort`), an Argo Rollouts traffic-router
   plugin, shadow diffing, budgets with confirmed deletes, webhook
   helper, and Prometheus metrics.
 

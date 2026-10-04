@@ -22,7 +22,7 @@ var version = "v0.2.0-dev"
 
 // Plugin implements rpc.TrafficRouterPlugin by writing ShardPlan
 // specs. Every method derives its write from the call arguments
-// plus one live plan read and keeps no state: net/rpc does not
+// plus a live plan read and keeps no state: net/rpc does not
 // persist the struct between calls, so retries and duplicate
 // deliveries converge. The client must be direct (non-cached):
 // VerifyWeight reads live acks.
@@ -149,8 +149,9 @@ func (p *Plugin) SetWeight(rollout *rolloutv1alpha1.Rollout, desiredWeight int32
 // VerifyWeight reports Verified only when the live spec carries
 // the desired weight in Active mode AND the canary entry acks the
 // live epoch, generation, and revision. Anything stale reports
-// NotVerified (never true); read and binding failures are RpcError
-// (fail closed: Argo surfaces them instead of advancing blind).
+// NotVerified (never true); out-of-range weights, read, and binding
+// failures are RpcError (fail closed: Argo surfaces them instead
+// of advancing blind).
 func (p *Plugin) VerifyWeight(rollout *rolloutv1alpha1.Rollout, desiredWeight int32,
 	additionalDestinations []rolloutv1alpha1.WeightDestination) (pluginTypes.RpcVerified, pluginTypes.RpcError) {
 	if len(additionalDestinations) > 0 {
