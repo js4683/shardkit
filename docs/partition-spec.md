@@ -55,9 +55,12 @@ set `I`, exclude label selector `X`, namespace name `n` with labels
 
 Include matching is an exact name set; exclude matching is a label
 selector evaluated against current namespace labels. If namespace
-labels cannot be read (missing from cache), the gate retains the last
-evaluated owner for that namespace and reports a degraded condition;
-it never silently flips ownership on a transient read error.
+labels cannot be read (missing from cache), the gate retains the
+owner evaluated under the same adopted version and reports a
+degraded condition; it never silently flips ownership on a transient
+read error. Adopting a new version clears per-namespace memory, so a
+read failure after a flip closes until a good read lands instead of
+serving the pre-flip owner.
 Relabels across the exclude boundary mid-version deny with
 `LabelsDrifted` on both tracks until a new version carries the new
 labels through the handshake (the relabel pin, D10); label churn

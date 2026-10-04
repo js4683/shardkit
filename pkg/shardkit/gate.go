@@ -68,7 +68,23 @@ type Gate struct {
 	// a handshake, and the gate denies until a new version carries
 	// the labels through drain, ack, and barrier (fail closed;
 	// label-only ownership otherwise flips with no fencing).
-	lastPin            map[string]labelPin
+	lastPin map[string]labelPin
+	// hs* is the observer's computed grant for the version it acts
+	// on, published on every baseline advance: validity, version,
+	// held set, and every namespace name the listing behind the
+	// grant observed. Owned consults it for first sightings (no
+	// pin): an owned verdict for a listed-but-unheld namespace
+	// moved without a handshake (relabeled after the listing) and
+	// denies until a version carries it through. Namespaces absent
+	// from the listing were created after it — genuinely new — and
+	// serve. Unset (hsValid false) before the observer's first
+	// advance: first sightings serve, as before.
+	hsValid            bool
+	hsUID              string
+	hsEpoch            int64
+	hsGen              int64
+	hsHeld             map[string]bool
+	hsListed           map[string]bool
 	degraded           string
 	externalHold       func() bool
 	draining           map[string]bool
@@ -296,16 +312,11 @@ func (g *Gate) Owned(ctx context.Context, namespace string) (obs Observation, er
 	}
 	excludedNow := partition.Excluded(ns.Labels, eval.ExcludeLabels)
 	g.mu.Lock()
-	if pin, ok := g.lastPin[namespace]; ok &&
-		pin.uid == evalUID && pin.epoch == evalEpoch && pin.gen == evalGen &&
-		pin.excluded != excludedNow {
-		g.degraded = ReasonLabelsDrifted
-		derr := &ClosedError{Reason: ReasonLabelsDrifted,
-			Msg: fmt.Sprintf("namespace %q relabeled across the exclude boundary at epoch %d; denied until a new version carries the labels through the handshake", namespace, evalEpoch)}
+	if derr := g.checkPinLocked(namespace, owner, excludedNow,
+		evalUID, evalEpoch, evalGen); derr != nil {
 		g.mu.Unlock()
 		return obs, derr
 	}
-	g.lastPin[namespace] = labelPin{uid: evalUID, epoch: evalEpoch, gen: evalGen, excluded: excludedNow}
 	g.lastOwner[namespace] = owner
 	g.degraded = ""
 	g.mu.Unlock()
@@ -406,43 +417,60 @@ func (g *Gate) singletonOwned(ctx context.Context) (owned bool, specRev string, 
 // the read share one in-flight API GET and each evaluate their own
 // copy; sharing ends when the call does, so nothing is cached and
 // loser convergence at a flip is unchanged (I1). A shared failure
-// fails every waiter closed, the safe direction, and a waiter whose
-// own context expired fails even when the shared read succeeded.
+// fails every waiter closed, the safe direction. The shared call
+// runs detached from any one waiter (WithoutCancel): a canceled
+// leader must not fail followers. Each waiter still honors its own
+// context — an already-expired caller fails without joining, and a
+// caller canceled mid-flight stops waiting while the shared call
+// continues for the rest. No invented timeout: the underlying
+// client's own timeouts still bound the read.
 func (g *Gate) getPlan(ctx context.Context) (v1alpha1.ShardPlan, error) {
-	v, err, _ := g.flight.Do("plan", func() (any, error) {
+	if err := ctx.Err(); err != nil {
+		return v1alpha1.ShardPlan{}, err
+	}
+	ch := g.flight.DoChan("plan", func() (any, error) {
 		var plan v1alpha1.ShardPlan
-		if err := g.client.Get(ctx, g.planKey, &plan); err != nil {
+		if err := g.client.Get(context.WithoutCancel(ctx), g.planKey, &plan); err != nil {
 			return nil, err
 		}
 		return &plan, nil
 	})
-	if err != nil {
-		return v1alpha1.ShardPlan{}, err
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return v1alpha1.ShardPlan{}, res.Err
+		}
+		return *res.Val.(*v1alpha1.ShardPlan).DeepCopy(), nil
+	case <-ctx.Done():
+		return v1alpha1.ShardPlan{}, ctx.Err()
 	}
-	if err := ctx.Err(); err != nil {
-		return v1alpha1.ShardPlan{}, err
-	}
-	return *v.(*v1alpha1.ShardPlan).DeepCopy(), nil
 }
 
 // getNamespace returns a private copy of one live namespace, sharing
 // one in-flight GET across callers racing on the same name. The same
-// no-caching contract as getPlan: every call observes the flip.
+// no-caching contract as getPlan: every call observes the flip. The
+// shared call is detached like getPlan's; each waiter keeps its own
+// cancellation.
 func (g *Gate) getNamespace(ctx context.Context, namespace string) (corev1.Namespace, error) {
-	v, err, _ := g.flight.Do("ns/"+namespace, func() (any, error) {
+	if err := ctx.Err(); err != nil {
+		return corev1.Namespace{}, err
+	}
+	ch := g.flight.DoChan("ns/"+namespace, func() (any, error) {
 		var ns corev1.Namespace
-		if err := g.client.Get(ctx, types.NamespacedName{Name: namespace}, &ns); err != nil {
+		if err := g.client.Get(context.WithoutCancel(ctx), types.NamespacedName{Name: namespace}, &ns); err != nil {
 			return nil, err
 		}
 		return &ns, nil
 	})
-	if err != nil {
-		return corev1.Namespace{}, err
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return corev1.Namespace{}, res.Err
+		}
+		return *res.Val.(*corev1.Namespace).DeepCopy(), nil
+	case <-ctx.Done():
+		return corev1.Namespace{}, ctx.Err()
 	}
-	if err := ctx.Err(); err != nil {
-		return corev1.Namespace{}, err
-	}
-	return *v.(*corev1.Namespace).DeepCopy(), nil
 }
 
 // adoptLocked records a fresh same-UID version as the new baseline
@@ -456,6 +484,14 @@ func (g *Gate) adoptLocked(plan *v1alpha1.ShardPlan, spec partition.Spec) {
 	g.lastStableRev = plan.Spec.Tracks.Stable.Revision
 	g.lastCanaryRev = trackRevision(plan.Spec, v1alpha1.TrackCanary)
 	g.lastSpec = *plan.Spec.DeepCopy()
+	// A new version restarts per-namespace memory: pins from older
+	// versions can never match again (dead entries pruned), and
+	// retained owners must not survive a flip — serving the
+	// pre-flip owner after adopting would authorize the loser.
+	// Retain covers same-version read failures only; post-flip
+	// failures close until a good read lands.
+	g.lastOwner = map[string]partition.Owner{}
+	g.lastPin = map[string]labelPin{}
 	g.degraded = ""
 }
 
@@ -476,6 +512,39 @@ func (g *Gate) resetBaselines(uid string, epoch, gen int64, spec partition.Spec,
 	g.lastOwner = map[string]partition.Owner{}
 	g.lastPin = map[string]labelPin{}
 	g.degraded = ""
+}
+
+// checkPinLocked enforces the pin rules and records the pin:
+// mid-version exclude-verdict changes deny (LabelsDrifted), and
+// first sightings of listed-but-unheld namespaces deny
+// (NotAcquired). Returns nil to proceed, or the denial. Callers
+// hold g.mu.
+func (g *Gate) checkPinLocked(namespace string, owner partition.Owner, excludedNow bool,
+	evalUID string, evalEpoch, evalGen int64) *ClosedError {
+	if pin, ok := g.lastPin[namespace]; ok {
+		if pin.uid == evalUID && pin.epoch == evalEpoch && pin.gen == evalGen &&
+			pin.excluded != excludedNow {
+			g.degraded = ReasonLabelsDrifted
+			return &ClosedError{Reason: ReasonLabelsDrifted,
+				Msg: fmt.Sprintf("namespace %q relabeled across the exclude boundary at epoch %d; denied until a new version carries the labels through the handshake", namespace, evalEpoch)}
+		}
+	} else if owner == g.want() && g.hsValid &&
+		g.hsUID == evalUID && g.hsEpoch == evalEpoch && g.hsGen == evalGen &&
+		g.hsListed[namespace] && !g.hsHeld[namespace] {
+		// First sighting of a namespace the observer's listing
+		// for this version observed but its grant omits: it
+		// moved without a handshake (relabeled after the
+		// listing, before this track ever evaluated it). Deny
+		// until a version carries it through; namespaces absent
+		// from the listing were created after it — genuinely
+		// new — and serve. Foreign verdicts serve — no
+		// authorization either way.
+		g.degraded = ReasonNotAcquired
+		return &ClosedError{Reason: ReasonNotAcquired,
+			Msg: fmt.Sprintf("namespace %q first evaluated at epoch %d outside the observer's computed grant (listed but unheld); denied until the handshake covers it (possible mid-version relabel)", namespace, evalEpoch)}
+	}
+	g.lastPin[namespace] = labelPin{uid: evalUID, epoch: evalEpoch, gen: evalGen, excluded: excludedNow}
+	return nil
 }
 
 // want maps this gate's track to the partition owner it seeks.
@@ -506,6 +575,26 @@ func (g *Gate) SetDraining(namespaces map[string]bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.draining = namespaces
+}
+
+// SetHandshakeState publishes the observer's computed grant for the
+// version it acts on: version, held namespace set, and every
+// namespace name the listing behind the grant observed. Owned
+// consults it for first sightings (see the hs fields). The observer
+// calls it on every baseline advance; both collections are copied.
+func (g *Gate) SetHandshakeState(uid string, epoch, gen int64, held map[string]bool, listed []string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.hsValid = true
+	g.hsUID, g.hsEpoch, g.hsGen = uid, epoch, gen
+	g.hsHeld = make(map[string]bool, len(held))
+	for ns := range held {
+		g.hsHeld[ns] = true
+	}
+	g.hsListed = make(map[string]bool, len(listed))
+	for _, ns := range listed {
+		g.hsListed[ns] = true
+	}
 }
 
 // SetDrainingSingleton marks singleton duty as relinquishing (or

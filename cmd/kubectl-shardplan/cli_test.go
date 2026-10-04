@@ -418,6 +418,55 @@ func TestSetWeight_ErrorsAndNoOp(t *testing.T) {
 	}
 }
 
+func TestBumpEpoch_HappyPath(t *testing.T) {
+	p := mkPlan(nil) // Active/1000 at epoch 2
+	c := cliFixture(t, p)
+	exec := mustParse(t, func(a []string, o, e *bytes.Buffer) (execFunc, bool) {
+		return parseBumpEpoch(a, o, e)
+	}, "demo")
+	code, stdout, _ := runExec(exec, c)
+	if code != 0 {
+		t.Fatalf("exit %d:\n%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "epoch 2 -> 3") || !strings.Contains(stdout, "spec unchanged") {
+		t.Errorf("stdout lacks bump line:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "watch: kubectl shardplan status demo -n cli-test") {
+		t.Errorf("stdout lacks watch hint:\n%s", stdout)
+	}
+	var live v1alpha1.ShardPlan
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: cliNS, Name: "demo"}, &live); err != nil {
+		t.Fatal(err)
+	}
+	want := p.Spec
+	want.Epoch = 3
+	if !reflect.DeepEqual(live.Spec, want) {
+		t.Errorf("live spec = %+v, want identical except epoch 3", live.Spec)
+	}
+}
+
+func TestBumpEpoch_Errors(t *testing.T) {
+	c := cliFixture(t, mkPlan(nil))
+	exec := mustParse(t, func(a []string, o, e *bytes.Buffer) (execFunc, bool) {
+		return parseBumpEpoch(a, o, e)
+	}, "demo", "--epoch", "2")
+	if code, _, stderr := runExec(exec, c); code != 1 || !strings.Contains(stderr, "must exceed") {
+		t.Errorf("epoch regression: exit %d stderr %q", code, stderr)
+	}
+	exec2 := mustParse(t, func(a []string, o, e *bytes.Buffer) (execFunc, bool) {
+		return parseBumpEpoch(a, o, e)
+	}, "demo", "--epoch", "9")
+	if code, stdout, _ := runExec(exec2, c); code != 0 || !strings.Contains(stdout, "epoch 2 -> 9") {
+		t.Errorf("explicit epoch: exit %d stdout %q", code, stdout)
+	}
+	var stdout, stderr bytes.Buffer
+	if _, ok := parseBumpEpoch(nil, &stdout, &stderr); ok {
+		t.Error("missing PLAN parsed, want usage error")
+	} else if !strings.Contains(stderr.String(), "exactly one PLAN") {
+		t.Errorf("stderr %q lacks usage hint", stderr.String())
+	}
+}
+
 func TestSetWeight_ZeroWarnsOnIncludes(t *testing.T) {
 	p := mkPlan(func(p *v1alpha1.ShardPlan) {
 		p.Spec.Canary.Include = v1alpha1.IncludeSpec{Namespaces: []string{"demo-87"}}

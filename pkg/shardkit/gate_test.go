@@ -673,6 +673,126 @@ func TestGate_StormSharesReads(t *testing.T) {
 	}
 }
 
+// TestGate_SharedReadLeaderCancel pins detached sharing: the leader
+// of a shared read cancels mid-flight, its own call fails, and the
+// follower still succeeds on the shared bytes with no second read.
+func TestGate_SharedReadLeaderCancel(t *testing.T) {
+	ctx := context.Background()
+	sr := &stormReader{Reader: fixture(t, nil),
+		entered: make(chan struct{}), release: make(chan struct{})}
+	g, err := Attach(ctx, sr, planKey, "stable", "rev-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sr.armed.Store(true)
+	leaderCtx, cancel := context.WithCancel(ctx)
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, err := g.Owned(leaderCtx, "demo-87")
+		leaderDone <- err
+	}()
+	select {
+	case <-sr.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("leader read never entered the delegate")
+	}
+	followerReady := make(chan struct{})
+	followerDone := make(chan error, 1)
+	go func() {
+		close(followerReady)
+		_, err := g.Owned(ctx, "demo-87")
+		followerDone <- err
+	}()
+	select {
+	case <-followerReady:
+	case <-time.After(10 * time.Second):
+		t.Fatal("follower never started")
+	}
+	time.Sleep(200 * time.Millisecond) // pile the follower onto the flight
+	cancel()
+	select {
+	case err := <-leaderDone:
+		if err == nil {
+			t.Fatal("canceled leader: nil error, want fail-closed")
+		} else if _, ok := AsClosed(err); !ok {
+			t.Fatalf("canceled leader err = %v, want ClosedError", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("canceled leader never returned")
+	}
+	close(sr.release)
+	select {
+	case err := <-followerDone:
+		if err != nil {
+			t.Fatalf("follower after leader cancel: %v, want success on shared bytes", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("follower never returned")
+	}
+	if got := sr.planReads(); got != 2 {
+		t.Fatalf("plan reads = %d, want 2 (attach + one shared storm read)", got)
+	}
+}
+
+// TestGate_SharedReadFollowerCancel pins prompt per-waiter
+// cancellation: a follower canceled mid-flight returns before the
+// shared read completes, and the leader still succeeds on it.
+func TestGate_SharedReadFollowerCancel(t *testing.T) {
+	ctx := context.Background()
+	sr := &stormReader{Reader: fixture(t, nil),
+		entered: make(chan struct{}), release: make(chan struct{})}
+	g, err := Attach(ctx, sr, planKey, "stable", "rev-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sr.armed.Store(true)
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, err := g.Owned(ctx, "demo-87")
+		leaderDone <- err
+	}()
+	select {
+	case <-sr.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("leader read never entered the delegate")
+	}
+	followerCtx, cancel := context.WithCancel(ctx)
+	followerReady := make(chan struct{})
+	followerDone := make(chan error, 1)
+	go func() {
+		close(followerReady)
+		_, err := g.Owned(followerCtx, "demo-87")
+		followerDone <- err
+	}()
+	select {
+	case <-followerReady:
+	case <-time.After(10 * time.Second):
+		t.Fatal("follower never started")
+	}
+	time.Sleep(200 * time.Millisecond) // pile the follower onto the flight
+	cancel()
+	select {
+	case err := <-followerDone:
+		if err == nil {
+			t.Fatal("canceled follower: nil error, want fail-closed")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("canceled follower hung on the blocked read (still coupled?)")
+	}
+	close(sr.release)
+	select {
+	case err := <-leaderDone:
+		if err != nil {
+			t.Fatalf("leader after follower cancel: %v, want success", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("leader never returned")
+	}
+	if got := sr.planReads(); got != 2 {
+		t.Fatalf("plan reads = %d, want 2 (attach + one shared storm read)", got)
+	}
+}
+
 // TestGate_CanceledContext pins fail-closed cancellation: an Owned
 // call whose context already expired fails instead of evaluating.
 func TestGate_CanceledContext(t *testing.T) {
@@ -762,6 +882,142 @@ func TestOwned_RelabelDriftDenies(t *testing.T) {
 	}
 	if canary.Degraded() != "" {
 		t.Fatalf("degraded = %q, want healthy", canary.Degraded())
+	}
+}
+
+// TestOwned_AdoptionClearsMemory pins version-scoped memory: adopting
+// a new version drops pins and retained owners, so post-flip read
+// failures close instead of serving the pre-flip owner, and deleted
+// namespaces stop accumulating records.
+func TestOwned_AdoptionClearsMemory(t *testing.T) {
+	ctx := context.Background()
+	c := fixture(t, nil)
+	g, err := Attach(ctx, c, planKey, "canary", "rev-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	flipActive(t, c)
+	if obs, _ := g.Owned(ctx, "demo-87"); !obs.Owned {
+		t.Fatal("setup: canary should own demo-87")
+	}
+	if obs, _ := g.Owned(ctx, "default"); obs.Owned {
+		t.Fatal("setup: canary should not own default")
+	}
+	if n := len(g.lastPin); n != 2 {
+		t.Fatalf("pins = %d, want 2 before adoption", n)
+	}
+	var live v1alpha1.ShardPlan
+	if err := c.Get(ctx, planKey, &live); err != nil {
+		t.Fatal(err)
+	}
+	live.Spec.Epoch = 3
+	if err := c.Update(ctx, &live); err != nil {
+		t.Fatal(err)
+	}
+	var ns corev1.Namespace
+	if err := c.Get(ctx, types.NamespacedName{Name: "demo-87"}, &ns); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Delete(ctx, &ns); err != nil {
+		t.Fatal(err)
+	}
+	// Adoption runs before the namespace read: the pre-flip owner
+	// is already forgotten, so the missing namespace closes.
+	if _, err := g.Owned(ctx, "demo-87"); err == nil {
+		t.Fatal("deleted namespace after adoption: nil error, want fail-closed")
+	} else if closed, ok := AsClosed(err); !ok || closed.Reason != ReasonPlanUnreadable {
+		t.Fatalf("err = %v, want closed PlanUnreadable", err)
+	}
+	if obs, err := g.Owned(ctx, "default"); err != nil || obs.Owned || obs.Epoch != 3 {
+		t.Fatalf("adopted obs = %+v err = %v, want foreign epoch 3", obs, err)
+	}
+	if n := len(g.lastPin); n != 1 {
+		t.Fatalf("pins = %d, want 1 (default re-pinned, demo-87 pruned)", n)
+	}
+	if n := len(g.lastOwner); n != 1 {
+		t.Fatalf("owners = %d, want 1 (demo-87 pruned)", n)
+	}
+}
+
+// TestOwned_FirstSightingNotAcquired pins the first-sighting rule:
+// a namespace this track never evaluated, relabeled into its grant
+// after the observer computed the version's grant, denies instead of
+// taking over without the freshness barrier. Namespaces created
+// after the computation are genuinely new and serve, and the next
+// version reopens the relabeled namespace through the handshake.
+func TestOwned_FirstSightingNotAcquired(t *testing.T) {
+	ctx := context.Background()
+	obs, g, fc := observerFixture(t, "stable")
+	var live v1alpha1.ShardPlan
+	if err := fc.Get(ctx, planKey, &live); err != nil {
+		t.Fatal(err)
+	}
+	live.Spec.Epoch = 2
+	live.Spec.Rollout = "r-2"
+	live.Spec.Canary.Mode = v1alpha1.ModeActive
+	live.Spec.Canary.WeightPerMille = 1000
+	live.Spec.Canary.Exclude.Selector = &metav1.LabelSelector{
+		MatchLabels: map[string]string{"tier": "critical"},
+	}
+	if err := fc.Update(ctx, &live); err != nil {
+		t.Fatal(err)
+	}
+	if err := obs.Step(ctx); err != nil { // resume at V2; stable holds nothing
+		t.Fatal(err)
+	}
+	// Membership-steady V3 completes a transition (clearing the
+	// resume drain), so the relabel below reaches the pin logic.
+	// Re-read first: the resume's status ack moved the object.
+	if err := fc.Get(ctx, planKey, &live); err != nil {
+		t.Fatal(err)
+	}
+	live.Spec.Epoch = 3
+	if err := fc.Update(ctx, &live); err != nil {
+		t.Fatal(err)
+	}
+	if err := obs.Step(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// demo-87 was never evaluated by this gate; relabeling it into
+	// the exclude set must deny, not authorize a fenceless takeover.
+	var ns corev1.Namespace
+	if err := fc.Get(ctx, types.NamespacedName{Name: "demo-87"}, &ns); err != nil {
+		t.Fatal(err)
+	}
+	ns.Labels = map[string]string{"tier": "critical"}
+	if err := fc.Update(ctx, &ns); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Owned(ctx, "demo-87"); err == nil {
+		t.Fatal("relabeled first sighting: nil error, want NotAcquired")
+	} else if closed, ok := AsClosed(err); !ok || closed.Reason != ReasonNotAcquired {
+		t.Fatalf("relabeled first sighting err = %v, want closed NotAcquired", err)
+	}
+	if g.Degraded() != ReasonNotAcquired {
+		t.Fatalf("degraded = %q, want NotAcquired", g.Degraded())
+	}
+	// Created after the observer's listing: genuinely new, serves.
+	late := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name: "late-ns", Labels: map[string]string{"tier": "critical"}}}
+	if err := fc.Create(ctx, late); err != nil {
+		t.Fatal(err)
+	}
+	if obs, err := g.Owned(ctx, "late-ns"); err != nil || !obs.Owned {
+		t.Fatalf("late obs = %+v err = %v, want owned", obs, err)
+	}
+	// The next version carries the relabel through the handshake.
+	if err := fc.Get(ctx, planKey, &live); err != nil {
+		t.Fatal(err)
+	}
+	live.Spec.Epoch = 4
+	if err := fc.Update(ctx, &live); err != nil {
+		t.Fatal(err)
+	}
+	if obs, err := g.Owned(ctx, "demo-87"); err != nil || !obs.Owned || obs.Epoch != 4 {
+		t.Fatalf("adopted obs = %+v err = %v, want owned epoch 4", obs, err)
+	}
+	if g.Degraded() != "" {
+		t.Fatalf("degraded = %q, want healthy", g.Degraded())
 	}
 }
 

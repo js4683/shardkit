@@ -56,5 +56,19 @@ authorized at once), not distributed fencing. Sharding is per
 cluster over namespace names; multi-cluster orchestration and
 non-namespace keys are out of scope.
 
+## Relabel recovery
+
+Relabeling a namespace across the exclude boundary mid-version
+denies writes on both tracks (`LabelsDrifted`, or `NotAcquired`
+when a track never evaluated it) instead of flipping ownership
+without a handshake. Recover with one line — a lone epoch bump
+with the identical spec, which carries the current labels
+through drain, ack, and barrier:
+
+```sh
+kubectl shardplan bump-epoch widget-operator -n widget-system
+kubectl shardplan status widget-operator -n widget-system  # watch it converge
+```
+
 Next: [Adopter onboarding](onboarding.md) drives all of the above
 hands-on against kind.

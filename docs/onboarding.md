@@ -9,7 +9,7 @@ the library into your own operator. The worked example is
 
 ## 1. Prerequisites
 
-Go 1.27.1, `kind`, `kubectl`, Docker. All commands use the
+Go 1.26.1, `kind`, `kubectl`, Docker. All commands use the
 `kind-shardkit-dev` context; the scripts never touch your current
 context. Pinned versions live in [decisions](decisions.md).
 
@@ -69,6 +69,23 @@ name leases via `shardkit.LeaseName(base, track)` in the plan's
 namespace. Deletions beyond a trickle go through
 `guarded.ConfirmDelete` with a `spec.budget` cap
 ([budgets](../docs/traces/m3-budgets.md)).
+
+### API load
+
+Reads stay direct by design ([D9](decisions.md)): steady state is
+2 GETs per reconcile per track (plan + namespace), measured at
+1.41 ms serial against envtest. Concurrent duplicates of the same
+key collapse onto one in-flight read, so a 100-call burst costs
+about 2 plan reads — but distinct namespaces do not dedup, so a
+10k-object full resync is up to ~20k GETs per track plus your own
+reads and writes. Size `rest.Config` QPS/Burst for peak
+reconciles/sec × 2 (the example keeps controller-runtime
+defaults; raise them if resyncs log client-side throttling), and
+on large or shared clusters give operator traffic its own API
+Priority and Fairness FlowSchema so rollouts neither starve nor
+starve others. The observer adds one plan read per poll plus a
+namespace list per transition — negligible next to reconcile
+load. Baselines: [m4-scale](traces/m4-scale.md).
 
 ## 5. Prove your integration
 

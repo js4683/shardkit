@@ -57,6 +57,13 @@ const (
 	// denies until a new version carries the labels through drain,
 	// ack, and barrier; see the label pin in gate.go.
 	ReasonLabelsDrifted = "LabelsDrifted"
+	// ReasonNotAcquired: first evaluation of a namespace the
+	// observer's listing for this version observed but its grant
+	// omits — it moved without a handshake (e.g. relabeled after
+	// the listing, before this track ever evaluated it). Denied
+	// until a version carries it through the handshake; namespaces
+	// absent from the listing (created after it) serve.
+	ReasonNotAcquired = "NotAcquired"
 	// ReasonExternalHold: a configured external hold (legacy-lease
 	// migration mutex, maintenance lock) is not satisfied; the
 	// track must not act even where the plan grants ownership.
