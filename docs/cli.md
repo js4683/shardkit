@@ -1,7 +1,7 @@
 # kubectl-shardplan CLI
 
 Manual ShardPlan operations: `status`, `explain`, `simulate`,
-`set-weight`, `abort`. The CLI works without Argo, so a plugin-API
+`set-weight`, `bump-epoch`, `abort`. The CLI works without Argo, so a plugin-API
 change degrades to manual steps rather than an outage (see the
 [roadmap](plans/roadmap.md) M1 package 5 and the
 [ShardPlan spec](shardplan-spec.md)).
@@ -36,7 +36,10 @@ kubectl shardplan explain widget-operator demo-87 -n widget-system
 `simulate PLAN` reports the ownership distribution for the live plan
 or a hypothetical `--weight`/`--mode`/`--seed`, over all namespaces
 or `--namespaces a,b`. It only reads; `no writes made` is printed
-on every run. `-q` prints counts only.
+on every successful run. `-q` prints counts only and skips building and sorting
+the per-namespace table. Explicit namespace selections ignore surrounding
+whitespace and count each name once; an empty selection is a usage error.
+The table shows at most 100 rows, with counts covering the full selection.
 
 ```sh
 kubectl shardplan simulate widget-operator --weight 100 --mode Active -q -n widget-system
@@ -50,6 +53,15 @@ the live weight and mode is a no-op, not a new epoch.
 
 ```sh
 kubectl shardplan set-weight widget-operator 100 --mode Active -n widget-system
+```
+
+`bump-epoch PLAN` assigns a new epoch with the identical spec, so the
+handshake re-evaluates the current world. A lone epoch bump is a contracted
+no-op write (V9): use it to recover from `LabelsDrifted` or `NotAcquired`
+denials after a namespace relabel.
+
+```sh
+kubectl shardplan bump-epoch widget-operator -n widget-system
 ```
 
 `abort PLAN` returns everything to stable (mode `Off`, weight 0) as

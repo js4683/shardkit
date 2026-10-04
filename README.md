@@ -23,7 +23,7 @@ stale or tampered plan stops all writes instead of causing a split brain.
 - **Acked handoffs** — tracks drain, release, and acquire behind each
   other's acknowledgements plus a freshness barrier over write versions.
 - **Operator tooling** — `kubectl-shardplan` CLI (`status`, `explain`,
-  `simulate`, `set-weight`, `abort`), an Argo Rollouts traffic-router
+  `simulate`, `set-weight`, `bump-epoch`, `abort`), an Argo Rollouts traffic-router
   plugin, shadow diffing, budgets with confirmed deletes, webhook
   helper, and Prometheus metrics.
 
@@ -47,6 +47,7 @@ Start with [How it works](docs/how-it-works.md), then
 [Adopter onboarding](docs/onboarding.md): drive a handoff yourself,
 then wire the library into your own operator.
 
+- [Architecture](docs/architecture.md) — component and handoff diagrams, code map, and safety boundaries
 - [ShardPlan spec](docs/shardplan-spec.md) — the API contract
 - [Safety model](docs/safety-model.md) — what is guaranteed and why
 - [CLI reference](docs/cli.md) — every command and flag

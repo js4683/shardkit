@@ -10,7 +10,6 @@ import (
 	"text/tabwriter"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/js4683/shardkit/api/v1alpha1"
@@ -85,12 +84,8 @@ func parseSimulate(args []string, stdout, stderr io.Writer) (execFunc, bool) {
 		fmt.Fprint(stderr, simulateUsage)
 		return nil, false
 	}
-	if raw := vals["--namespaces"]; raw != "" {
-		for _, n := range strings.Split(raw, ",") {
-			if n = strings.TrimSpace(n); n != "" {
-				o.namespaces = append(o.namespaces, n)
-			}
-		}
+	if raw, set := vals["--namespaces"]; set {
+		o.namespaces = namespaceNames(raw)
 		if len(o.namespaces) == 0 {
 			fmt.Fprintln(stderr, "error: --namespaces names nothing; drop the flag for all namespaces")
 			return nil, false
@@ -112,6 +107,82 @@ func execSimulate(ctx context.Context, c client.Client, namespace string, o simu
 		fmt.Fprintf(stderr, "error: plan %q does not map to an ownership model: %v\n", o.plan, err)
 		return 1
 	}
+	hypo, ok := hypotheticalSpec(live, o, stderr)
+	if !ok {
+		return 1
+	}
+	items, ok := simNamespaces(ctx, c, o.namespaces, stderr)
+	if !ok {
+		return 1
+	}
+	var rows []simulationRow
+	counts := map[partition.Owner]int{}
+	for _, ns := range items {
+		owner, rule, err := namespaceOwner(hypo, ns.Name, ns.Labels)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: cannot evaluate %q: %v\n", ns.Name, err)
+			return 1
+		}
+		if !o.quiet {
+			rows = append(rows, simulationRow{ns.Name, owner, rule})
+		}
+		counts[owner]++
+	}
+	fmt.Fprintf(stdout, "simulate %s/%s: mode %s weight %d seed %q\n",
+		namespace, o.plan, hypo.Mode, hypo.WeightPerMille, hypo.Seed)
+	if len(items) == 0 {
+		fmt.Fprintln(stdout, "no namespaces found (nothing to assign); no writes made")
+		return 0
+	}
+	fmt.Fprintf(stdout, "stable: %d  canary: %d  (%d namespaces, no writes made)\n",
+		counts[partition.Stable], counts[partition.Canary], len(items))
+	if o.quiet {
+		return 0
+	}
+	printSimulationRows(stdout, rows)
+	return 0
+}
+
+type simulationRow struct {
+	name  string
+	owner partition.Owner
+	rule  string
+}
+
+func printSimulationRows(stdout io.Writer, rows []simulationRow) {
+	sort.Slice(rows, func(i, j int) bool { return rows[i].name < rows[j].name })
+	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "NAMESPACE\tOWNER\tRULE")
+	shown := rows
+	truncated := 0
+	if len(rows) > maxSimRows {
+		shown, truncated = rows[:maxSimRows], len(rows)-maxSimRows
+	}
+	for _, r := range shown {
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", r.name, r.owner, r.rule)
+	}
+	_ = tw.Flush()
+	if truncated > 0 {
+		fmt.Fprintf(stdout, "(%d more rows cut; re-run with -q for counts only)\n", truncated)
+	}
+}
+
+// namespaceNames treats the selection as a set, preserving the first occurrence.
+func namespaceNames(raw string) []string {
+	var names []string
+	seen := map[string]bool{}
+	for _, name := range strings.Split(raw, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	return names
+}
+
+func hypotheticalSpec(live partition.Spec, o simulateOpts, stderr io.Writer) (partition.Spec, bool) {
 	hypo := live
 	if o.mode != "" {
 		hypo.Mode = partitionMode(o.mode)
@@ -130,55 +201,9 @@ func execSimulate(ctx context.Context, c client.Client, namespace string, o simu
 			hint = "; pass --weight 0 to preview a non-active mode"
 		}
 		fmt.Fprintf(stderr, "error: hypothetical spec invalid: %v%s\n", err, hint)
-		return 1
+		return partition.Spec{}, false
 	}
-	items, ok := simNamespaces(ctx, c, o.namespaces, stderr)
-	if !ok {
-		return 1
-	}
-	type row struct {
-		name  string
-		owner partition.Owner
-		rule  string
-	}
-	var rows []row
-	counts := map[partition.Owner]int{}
-	for _, ns := range items {
-		owner, rule, err := namespaceOwner(hypo, ns.Name, ns.Labels)
-		if err != nil {
-			fmt.Fprintf(stderr, "error: cannot evaluate %q: %v\n", ns.Name, err)
-			return 1
-		}
-		rows = append(rows, row{ns.Name, owner, rule})
-		counts[owner]++
-	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].name < rows[j].name })
-	fmt.Fprintf(stdout, "simulate %s/%s: mode %s weight %d seed %q\n",
-		namespace, o.plan, partitionModeName(hypo.Mode), hypo.WeightPerMille, hypo.Seed)
-	if len(rows) == 0 {
-		fmt.Fprintln(stdout, "no namespaces found (nothing to assign); no writes made")
-		return 0
-	}
-	fmt.Fprintf(stdout, "stable: %d  canary: %d  (%d namespaces, no writes made)\n",
-		counts[partition.Stable], counts[partition.Canary], len(rows))
-	if o.quiet {
-		return 0
-	}
-	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAMESPACE\tOWNER\tRULE")
-	shown := rows
-	truncated := 0
-	if len(rows) > maxSimRows {
-		shown, truncated = rows[:maxSimRows], len(rows)-maxSimRows
-	}
-	for _, r := range shown {
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", r.name, r.owner, r.rule)
-	}
-	_ = tw.Flush()
-	if truncated > 0 {
-		fmt.Fprintf(stdout, "(%d more rows cut; re-run with -q for counts only)\n", truncated)
-	}
-	return 0
+	return hypo, true
 }
 
 // simNamespaces resolves the simulation set with reads only: named
@@ -187,12 +212,11 @@ func simNamespaces(ctx context.Context, c client.Client, names []string, stderr 
 	if len(names) > 0 {
 		var out []corev1.Namespace
 		for _, n := range names {
-			var ns corev1.Namespace
-			if err := c.Get(ctx, types.NamespacedName{Name: n}, &ns); err != nil {
-				fmt.Fprintf(stderr, "error: namespace %q not found\n", n)
+			ns, ok := getNamespace(ctx, c, n, stderr)
+			if !ok {
 				return nil, false
 			}
-			out = append(out, ns)
+			out = append(out, *ns)
 		}
 		return out, true
 	}
@@ -212,16 +236,5 @@ func partitionMode(mode string) partition.Mode {
 		return partition.ModeActive
 	default:
 		return partition.ModeOff
-	}
-}
-
-func partitionModeName(m partition.Mode) string {
-	switch m {
-	case partition.ModeShadow:
-		return v1alpha1.ModeShadow
-	case partition.ModeActive:
-		return v1alpha1.ModeActive
-	default:
-		return v1alpha1.ModeOff
 	}
 }
