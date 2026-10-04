@@ -36,7 +36,10 @@ kubectl shardplan explain widget-operator demo-87 -n widget-system
 `simulate PLAN` reports the ownership distribution for the live plan
 or a hypothetical `--weight`/`--mode`/`--seed`, over all namespaces
 or `--namespaces a,b`. It only reads; `no writes made` is printed
-on every run. `-q` prints counts only.
+on every successful run. `-q` prints counts only and skips building and sorting
+the per-namespace table. Explicit namespace selections ignore surrounding
+whitespace and count each name once; an empty selection is a usage error.
+The table shows at most 100 rows, with counts covering the full selection.
 
 ```sh
 kubectl shardplan simulate widget-operator --weight 100 --mode Active -q -n widget-system

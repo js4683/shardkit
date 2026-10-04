@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"sort"
+	"strings"
 	"text/tabwriter"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -94,34 +94,15 @@ func formatIncludes(ns []string) string {
 	if len(ns) == 0 {
 		return "none"
 	}
-	out := ""
-	for i, n := range ns {
-		if i > 0 {
-			out += ","
-		}
-		out += n
-	}
-	return "[" + out + "]"
+	return "[" + strings.Join(ns, ",") + "]"
 }
 
 func formatExcludes(plan *v1alpha1.ShardPlan) string {
 	sel := plan.Spec.Canary.Exclude.Selector
-	if sel == nil || len(sel.MatchLabels) == 0 {
+	if sel == nil {
 		return "none"
 	}
-	keys := make([]string, 0, len(sel.MatchLabels))
-	for k := range sel.MatchLabels {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	out := ""
-	for i, k := range keys {
-		if i > 0 {
-			out += ","
-		}
-		out += k + "=" + sel.MatchLabels[k]
-	}
-	return "{" + out + "}"
+	return formatLabels(sel.MatchLabels)
 }
 
 func printTrackTable(stdout io.Writer, plan *v1alpha1.ShardPlan) {

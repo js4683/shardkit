@@ -47,6 +47,7 @@ Start with [How it works](docs/how-it-works.md), then
 [Adopter onboarding](docs/onboarding.md): drive a handoff yourself,
 then wire the library into your own operator.
 
+- [Architecture](docs/architecture.md) — component and handoff diagrams, code map, and safety boundaries
 - [ShardPlan spec](docs/shardplan-spec.md) — the API contract
 - [Safety model](docs/safety-model.md) — what is guaranteed and why
 - [CLI reference](docs/cli.md) — every command and flag

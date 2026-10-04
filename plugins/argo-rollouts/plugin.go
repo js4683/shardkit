@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -45,8 +46,10 @@ func (p *Plugin) Type() string { return "shardkit" }
 // ServiceAccount, which the install manifests must grant ShardPlan
 // read/write.
 func (p *Plugin) InitPlugin() pluginTypes.RpcError {
+	ctx, cancel := context.WithTimeout(context.Background(), apiTimeout)
+	defer cancel()
 	var list v1alpha1.ShardPlanList
-	if err := p.Client.List(context.Background(), &list, client.Limit(1)); err != nil {
+	if err := p.Client.List(ctx, &list, client.Limit(1)); err != nil {
 		return rpcErrorf("shardkit: InitPlugin: cannot list ShardPlans: %v "+
 			"(grant the Argo Rollouts ServiceAccount ShardPlan RBAC and install config/crd/)", err)
 	}
@@ -73,36 +76,16 @@ func (p *Plugin) UpdateHash(rollout *rolloutv1alpha1.Rollout, canaryHash, stable
 		return rpcErrorf("shardkit: UpdateHash: empty canary (%q) or stable (%q) hash",
 			canaryHash, stableHash)
 	}
-	plan, rerr := p.resolvePlan(context.Background(), rollout)
-	if rerr.HasError() {
-		return rerr
-	}
-	if plan.Spec.Tracks.Canary == nil {
-		return rpcErrorf("shardkit: UpdateHash: ShardPlan %s/%s has no canary track revision",
-			plan.Namespace, plan.Name)
-	}
-	if plan.Spec.Tracks.Canary.Revision == canaryHash {
-		return pluginTypes.RpcError{} // hash already bound
-	}
-	if verr := validLive(plan); verr.HasError() {
-		return verr
-	}
-	next := plan.DeepCopy()
-	// Canary side only: the stable track is externally managed (its
-	// revision belongs to the plain Deployment / CLI flow), while
-	// stableHash names Argo's own stable ReplicaSet — writing it
-	// into spec.tracks.stable would void the real stable operator
-	// (S7) and stall every handoff.
-	next.Spec.Tracks.Canary.Revision = canaryHash
-	next.Spec.Epoch = plan.Spec.Epoch + 1
-	if err := next.ValidateUpdate(plan); err != nil {
-		return rpcErrorf("shardkit: UpdateHash: update rejected: %v", err)
-	}
-	if err := p.updateWithRetry(context.Background(), next,
-		fmt.Sprintf("UpdateHash(canary=%s)", canaryHash)); err != nil {
-		return rpcErrorf("shardkit: UpdateHash: %v", err)
-	}
-	return pluginTypes.RpcError{}
+	return p.mutatePlan(rollout, fmt.Sprintf("UpdateHash(canary=%s)", canaryHash), func(next *v1alpha1.ShardPlan) (bool, error) {
+		if next.Spec.Tracks.Canary == nil {
+			return false, fmt.Errorf("ShardPlan %s/%s has no canary track revision", next.Namespace, next.Name)
+		}
+		if next.Spec.Tracks.Canary.Revision == canaryHash {
+			return false, nil
+		}
+		next.Spec.Tracks.Canary.Revision = canaryHash
+		return true, nil
+	})
 }
 
 // trafficScale reads the rollout's maxTrafficWeight (default 100):
@@ -111,6 +94,9 @@ func (p *Plugin) UpdateHash(rollout *rolloutv1alpha1.Rollout, canaryHash, stable
 // allows 0.1% steps. Granularities that do not divide 1000 evenly
 // fail closed — the plan cannot represent them exactly.
 func trafficScale(rollout *rolloutv1alpha1.Rollout) (int32, pluginTypes.RpcError) {
+	if rollout == nil {
+		return 0, rpcErrorf("shardkit: nil Rollout")
+	}
 	maxWeight := int32(100)
 	if canary := rollout.Spec.Strategy.Canary; canary != nil &&
 		canary.TrafficRouting != nil && canary.TrafficRouting.MaxTrafficWeight != nil {
@@ -152,34 +138,12 @@ func (p *Plugin) SetWeight(rollout *rolloutv1alpha1.Rollout, desiredWeight int32
 		return rpcErrorf("shardkit: SetWeight: additional destinations (%d) have no object-routing meaning; manage cohorts with the CLI",
 			len(additionalDestinations))
 	}
-	plan, rerr := p.resolvePlan(context.Background(), rollout)
-	if rerr.HasError() {
-		return rerr
-	}
-	if verr := validLive(plan); verr.HasError() {
-		return verr
-	}
 	target := desiredWeight * (1000 / maxWeight)
 	wantMode := v1alpha1.ModeActive
 	if desiredWeight == 0 {
 		wantMode = v1alpha1.ModeOff
 	}
-	if plan.Spec.Canary.Mode == wantMode &&
-		plan.Spec.Canary.WeightPerMille == target {
-		return pluginTypes.RpcError{} // desired state already holds
-	}
-	next := plan.DeepCopy()
-	next.Spec.Canary.Mode = wantMode
-	next.Spec.Canary.WeightPerMille = target
-	next.Spec.Epoch = plan.Spec.Epoch + 1
-	if err := next.ValidateUpdate(plan); err != nil {
-		return rpcErrorf("shardkit: SetWeight: update rejected: %v", err)
-	}
-	if err := p.updateWithRetry(context.Background(), next,
-		fmt.Sprintf("SetWeight(%d)", desiredWeight)); err != nil {
-		return rpcErrorf("shardkit: SetWeight: %v", err)
-	}
-	return pluginTypes.RpcError{}
+	return p.mutatePlan(rollout, fmt.Sprintf("SetWeight(%d)", desiredWeight), setWeight(target, wantMode))
 }
 
 // VerifyWeight reports Verified only when the live spec carries
@@ -194,7 +158,9 @@ func (p *Plugin) VerifyWeight(rollout *rolloutv1alpha1.Rollout, desiredWeight in
 			rpcErrorf("shardkit: VerifyWeight: additional destinations (%d) have no object-routing meaning; manage cohorts with the CLI",
 				len(additionalDestinations))
 	}
-	plan, rerr := p.resolvePlan(context.Background(), rollout)
+	ctx, cancel := context.WithTimeout(context.Background(), apiTimeout)
+	defer cancel()
+	plan, rerr := p.resolvePlan(ctx, rollout)
 	if rerr.HasError() {
 		return pluginTypes.NotVerified, rerr
 	}
@@ -205,6 +171,9 @@ func (p *Plugin) VerifyWeight(rollout *rolloutv1alpha1.Rollout, desiredWeight in
 	if rerr.HasError() {
 		return pluginTypes.NotVerified, rerr
 	}
+	if desiredWeight < 0 || desiredWeight > maxWeight {
+		return pluginTypes.NotVerified, rpcErrorf("shardkit: VerifyWeight: desired weight %d out of range 0-%d", desiredWeight, maxWeight)
+	}
 	if plan.Spec.Canary.Mode != v1alpha1.ModeActive ||
 		plan.Spec.Canary.WeightPerMille != desiredWeight*(1000/maxWeight) {
 		return pluginTypes.NotVerified, pluginTypes.RpcError{}
@@ -214,20 +183,23 @@ func (p *Plugin) VerifyWeight(rollout *rolloutv1alpha1.Rollout, desiredWeight in
 			rpcErrorf("shardkit: VerifyWeight: ShardPlan %s/%s has no canary track revision",
 				plan.Namespace, plan.Name)
 	}
-	for i := range plan.Status.Tracks {
-		e := &plan.Status.Tracks[i]
-		if e.Name != v1alpha1.TrackCanary {
-			continue
-		}
-		if e.PlanUID == string(plan.UID) &&
-			e.ObservedEpoch == plan.Spec.Epoch &&
-			e.ObservedGeneration == plan.Generation &&
-			e.Revision == plan.Spec.Tracks.Canary.Revision {
-			return pluginTypes.Verified, pluginTypes.RpcError{}
-		}
-		return pluginTypes.NotVerified, pluginTypes.RpcError{}
+	if canaryAckMatches(plan) {
+		return pluginTypes.Verified, pluginTypes.RpcError{}
 	}
 	return pluginTypes.NotVerified, pluginTypes.RpcError{}
+}
+
+func canaryAckMatches(plan *v1alpha1.ShardPlan) bool {
+	for _, entry := range plan.Status.Tracks {
+		if entry.Name != v1alpha1.TrackCanary {
+			continue
+		}
+		return entry.PlanUID == string(plan.UID) &&
+			entry.ObservedEpoch == plan.Spec.Epoch &&
+			entry.ObservedGeneration == plan.Generation &&
+			entry.Revision == plan.Spec.Tracks.Canary.Revision
+	}
+	return false
 }
 
 // SetHeaderRoute has no object-routing meaning; succeeding would
@@ -249,28 +221,7 @@ func (p *Plugin) SetMirrorRoute(_ *rolloutv1alpha1.Rollout,
 // namespace and the CLI can take over from the rest state, so a
 // lost plugin never strands the rollout.
 func (p *Plugin) RemoveManagedRoutes(ro *rolloutv1alpha1.Rollout) pluginTypes.RpcError {
-	plan, rerr := p.resolvePlan(context.Background(), ro)
-	if rerr.HasError() {
-		return rerr
-	}
-	if verr := validLive(plan); verr.HasError() {
-		return verr
-	}
-	if plan.Spec.Canary.Mode == v1alpha1.ModeOff &&
-		plan.Spec.Canary.WeightPerMille == 0 {
-		return pluginTypes.RpcError{} // already aborted
-	}
-	next := plan.DeepCopy()
-	next.Spec.Canary.Mode = v1alpha1.ModeOff
-	next.Spec.Canary.WeightPerMille = 0
-	next.Spec.Epoch = plan.Spec.Epoch + 1
-	if err := next.ValidateUpdate(plan); err != nil {
-		return rpcErrorf("shardkit: RemoveManagedRoutes: update rejected: %v", err)
-	}
-	if err := p.updateWithRetry(context.Background(), next, "RemoveManagedRoutes"); err != nil {
-		return rpcErrorf("shardkit: RemoveManagedRoutes: %v", err)
-	}
-	return pluginTypes.RpcError{}
+	return p.mutatePlan(ro, "RemoveManagedRoutes", setWeight(0, v1alpha1.ModeOff))
 }
 
 // resolvePlan binds one Rollout to its ShardPlan via the opaque
@@ -303,31 +254,66 @@ func (p *Plugin) resolvePlan(ctx context.Context,
 	return match, pluginTypes.RpcError{}
 }
 
-// updateWithRetry writes one spec update, retrying RV conflicts.
-// Callers validate before calling; a plan that changed underneath
-// is re-driven by the controller's next call (stateless retries
-// converge). Every attempt is logged: the plugin is the only spec
-// writer besides the CLI, so this line is the audit trail that
-// attributes each epoch.
-func (p *Plugin) updateWithRetry(ctx context.Context, next *v1alpha1.ShardPlan, why string) error {
+// apiTimeout bounds a plugin call even when the Kubernetes API stops responding.
+const apiTimeout = 30 * time.Second
+
+// setWeight changes only routing fields; an already-matching plan is a no-op.
+func setWeight(weight int32, mode string) func(*v1alpha1.ShardPlan) (bool, error) {
+	return func(next *v1alpha1.ShardPlan) (bool, error) {
+		if next.Spec.Canary.Mode == mode && next.Spec.Canary.WeightPerMille == weight {
+			return false, nil
+		}
+		next.Spec.Canary.Mode, next.Spec.Canary.WeightPerMille = mode, weight
+		return true, nil
+	}
+}
+
+// mutatePlan re-resolves the binding and derives each attempt from the live
+// plan. Refreshing only resourceVersion would overwrite concurrent spec or
+// metadata changes. Validation and no-op detection also run on every retry.
+func (p *Plugin) mutatePlan(rollout *rolloutv1alpha1.Rollout, why string, mutate func(*v1alpha1.ShardPlan) (bool, error)) pluginTypes.RpcError {
+	ctx, cancel := context.WithTimeout(context.Background(), apiTimeout)
+	defer cancel()
 	for attempt := 1; ; attempt++ {
-		err := p.Client.Update(ctx, next)
-		log.Printf("shardkit-plugin write op=%s plan=%s/%s epoch=%d mode=%s weight=%d canaryRev=%s stableRev=%s attempt=%d err=%v",
-			why, next.Namespace, next.Name, next.Spec.Epoch, next.Spec.Canary.Mode,
-			next.Spec.Canary.WeightPerMille, next.Spec.Tracks.Canary.Revision,
-			next.Spec.Tracks.Stable.Revision, attempt, err)
+		live, rerr := p.resolvePlan(ctx, rollout)
+		if rerr.HasError() {
+			return rerr
+		}
+		if verr := validLive(live); verr.HasError() {
+			return verr
+		}
+		next := live.DeepCopy()
+		changed, err := mutate(next)
+		if err != nil {
+			return rpcErrorf("shardkit: %s: %v", why, err)
+		}
+		if !changed {
+			return pluginTypes.RpcError{}
+		}
+		next.Spec.Epoch = live.Spec.Epoch + 1
+		if err := next.ValidateUpdate(live); err != nil {
+			return rpcErrorf("shardkit: %s: update rejected: %v", why, err)
+		}
+		err = p.Client.Update(ctx, next)
+		logPlanWrite(next, why, attempt, err)
 		if err == nil {
-			return nil
+			return pluginTypes.RpcError{}
 		}
 		if !apierrors.IsConflict(err) || attempt >= 3 {
-			return err
+			return rpcErrorf("shardkit: %s: %v", why, err)
 		}
-		var live v1alpha1.ShardPlan
-		if gerr := p.Client.Get(ctx, client.ObjectKeyFromObject(next), &live); gerr != nil {
-			return gerr
-		}
-		next.SetResourceVersion(live.GetResourceVersion())
 	}
+}
+
+func logPlanWrite(plan *v1alpha1.ShardPlan, why string, attempt int, err error) {
+	canaryRevision := ""
+	if plan.Spec.Tracks.Canary != nil {
+		canaryRevision = plan.Spec.Tracks.Canary.Revision
+	}
+	log.Printf("shardkit-plugin write op=%s plan=%s/%s epoch=%d mode=%s weight=%d canaryRev=%s stableRev=%s attempt=%d err=%v",
+		why, plan.Namespace, plan.Name, plan.Spec.Epoch, plan.Spec.Canary.Mode,
+		plan.Spec.Canary.WeightPerMille, canaryRevision,
+		plan.Spec.Tracks.Stable.Revision, attempt, err)
 }
 
 func rpcErrorf(format string, args ...any) pluginTypes.RpcError {

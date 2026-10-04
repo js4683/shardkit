@@ -49,8 +49,14 @@ and is written in Go (upstream constraints, see
 
 No call keeps state in the plugin struct: net/rpc does not
 persist it between calls. Every method derives its write from the
-call arguments plus one live plan read, so retries and duplicate
-deliveries converge.
+call arguments plus a live plan read, so retries and duplicate
+deliveries converge. Resource-version conflicts retry up to three times;
+each attempt resolves the binding again, validates the live plan, and
+rebuilds the requested change while preserving concurrent edits. If another
+writer already reached the desired state, the retry is a no-op. All API
+operations for one plugin call share a 30-second context deadline.
+Read, validation, timeout, and exhausted-conflict errors return to Argo
+without treating the operation as successful.
 
 ## Method bindings
 
@@ -91,7 +97,7 @@ name, not `Type()`.
 | `Type()` | returns `"shardkit"` | pure |
 | `InitPlugin()` | list ShardPlans (connectivity + RBAC probe) | error surfaces Argo-side when the API is unreachable. The probe list is cluster-scoped (no namespace at init), so the install needs the read-only `argo-rollouts-shardplans-read` ClusterRole in `config/argo/shardplan-rbac.yaml` — without it every fresh controller pod fails init and no step ever advances (found live 2026-09-27) |
 | `SetWeight(rollout, w, addl)` | epoch+1: `Active` at weight `w*(1000/maxTrafficWeight)` for `w > 0`, `Off` at 0 for `w == 0`; rollout ID preserved | no-op when live already matches; nonempty `addl` is an `RpcError` (v1 has no per-destination objects; cohorts stay CLI-managed); out-of-range `w` or an inexact scale is an `RpcError` |
-| `VerifyWeight(rollout, w, addl)` | compare live spec + canary ack | `Verified` only when spec weight is `w*(1000/maxTrafficWeight)` **and** the canary entry acks the live epoch, generation, and revision. Anything stale reports `NotVerified`, never true (M2 exit: stale VerifyWeight false); nonempty `addl` is an `RpcError` (unverifiable destinations must not read as verified); read errors return `RpcError` (fail closed). Operational consequence (seen live 2026-09-27): Argo logs `Desired weight N not yet verified` every sync and never advances while the canary operator runs a stale `REVISION` (S7 voids its acks) — hand-patched rollout templates must be followed by an operator revision sync, which `argo-demo.sh` does per iteration |
+| `VerifyWeight(rollout, w, addl)` | compare live spec + canary ack | `Verified` only when spec weight is `w*(1000/maxTrafficWeight)` **and** the canary entry acks the live epoch, generation, and revision. Anything stale reports `NotVerified`, never true (M2 exit: stale VerifyWeight false); nonempty `addl` is an `RpcError` (unverifiable destinations must not read as verified); out-of-range weights and read errors return `RpcError` (fail closed). Operational consequence (seen live 2026-09-27): Argo logs `Desired weight N not yet verified` every sync and never advances while the canary operator runs a stale `REVISION` (S7 voids its acks) — hand-patched rollout templates must be followed by an operator revision sync, which `argo-demo.sh` does per iteration |
 | `UpdateHash(rollout, canary, stable, addl)` | epoch+1 preserving mode/weight, canary revision set to the canary hash (S7 binding) | no-op when the canary hash already matches spec; nonempty `addl` and empty hashes are `RpcError`. The stable hash is validated non-empty but otherwise ignored: the stable track is externally managed (plain Deployment / CLI flow), while `stable` names Argo's own stable ReplicaSet — writing it into `spec.tracks.stable` would void the real stable operator and stall every handoff |
 | `SetHeaderRoute` / `SetMirrorRoute` | none | `RpcError`: object routing has no headers or mirrors; silent success would lie to the rollout |
 | `RemoveManagedRoutes(rollout)` | epoch+1 `Off`, weight 0 (abort) | called on rollout deletion, on abort, and on **every sync of a fully-promoted rollout** (`reconcileTrafficRouting`: the `IsFullyPromoted` branch runs before the bottom `SetWeight(0)`); no-op when already `Off`; stable reclaims everything and the CLI can take over from there (M2 exit: plugin loss recoverable through CLI). An analysis abort reaches this method through Argo's abort branch (observed live: `RemoveManagedRoutes` wrote the abort epoch; the bottom `SetWeight(0)` then no-ops against `Off`/0); deletion is the other caller |

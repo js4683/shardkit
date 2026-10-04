@@ -7,6 +7,9 @@ namespaces between the copies through a handshake both sides
 acknowledge, and anything uncertain denies work instead of
 guessing.
 
+For component and handoff diagrams with links to the implementation, see
+[Architecture](architecture.md).
+
 ## The pieces
 
 - **Plan (spec).** Mode (`Active`/`Off`), canary weight in per
@@ -29,7 +32,7 @@ guessing.
 
 ## One handoff, end to end
 
-1. Operator runs `kubectl-shardplan set-weight 25`: plan goes
+1. Operator runs `kubectl shardplan set-weight PLAN 250 --mode Active`: plan goes
    `Active`/250 at epoch N+1.
 2. Both observers see the new version. Stable drains the
    namespaces it lost and acks `Released`; canary waits for that

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -46,13 +47,8 @@ func execExplain(ctx context.Context, c client.Client, namespace, planName, nsNa
 	if !ok {
 		return 1
 	}
-	var ns corev1.Namespace
-	if err := c.Get(ctx, types.NamespacedName{Name: nsName}, &ns); err != nil {
-		if errors.IsNotFound(err) {
-			fmt.Fprintf(stderr, "error: namespace %q not found\n", nsName)
-		} else {
-			fmt.Fprintf(stderr, "error: cannot read namespace %q: %v\n", nsName, err)
-		}
+	ns, ok := getNamespace(ctx, c, nsName, stderr)
+	if !ok {
 		return 1
 	}
 	spec, err := shardkit.PartitionSpec(plan)
@@ -84,6 +80,20 @@ func execExplain(ctx context.Context, c client.Client, namespace, planName, nsNa
 	return 0
 }
 
+// getNamespace preserves API errors so missing objects and read failures differ.
+func getNamespace(ctx context.Context, c client.Client, nsName string, stderr io.Writer) (*corev1.Namespace, bool) {
+	var ns corev1.Namespace
+	if err := c.Get(ctx, types.NamespacedName{Name: nsName}, &ns); err != nil {
+		if errors.IsNotFound(err) {
+			fmt.Fprintf(stderr, "error: namespace %q not found\n", nsName)
+		} else {
+			fmt.Fprintf(stderr, "error: cannot read namespace %q: %v\n", nsName, err)
+		}
+		return nil, false
+	}
+	return &ns, true
+}
+
 func formatLabels(labels map[string]string) string {
 	if len(labels) == 0 {
 		return "none"
@@ -93,14 +103,11 @@ func formatLabels(labels map[string]string) string {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	out := ""
-	for i, k := range keys {
-		if i > 0 {
-			out += ","
-		}
-		out += k + "=" + labels[k]
+	pairs := make([]string, 0, len(keys))
+	for _, k := range keys {
+		pairs = append(pairs, k+"="+labels[k])
 	}
-	return "{" + out + "}"
+	return "{" + strings.Join(pairs, ",") + "}"
 }
 
 // formatWindow renders the ownership window [offset, offset+w) modulo
