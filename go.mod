@@ -3,7 +3,7 @@ module github.com/js4683/shardkit
 go 1.26.1
 
 require (
-	github.com/argoproj/argo-rollouts v1.10.0
+	github.com/argoproj/argo-rollouts v1.10.1
 	github.com/hashicorp/go-plugin v1.8.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.3
